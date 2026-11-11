@@ -360,6 +360,7 @@ async function runJob(job) {
   if (job.kind === 'npm') return checkDependency(job);
   if (job.kind === 'wayback') return scanWayback(job);
   if (job.kind === 'replay') return replayRequest(job);
+  if (job.kind === 'probe') return probeRequest(job);
 }
 
 // ───────────────────────── scanners ─────────────────────────
@@ -760,6 +761,46 @@ async function replayRequest(job) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+// ── endpoint liveness (opt-in, same-site): the same safe GET candidates as "send to proxy",
+// but the response status is recorded so you can tell apart live (200), protected (401/403),
+// wrong-method (405), redirecting (3xx) and dead (404) endpoints. Never cross-site, GET only.
+
+const MAX_PROBE = 300;
+
+async function probeEndpoints({ host, urls }) {
+  await ready();
+  if (!host || !Array.isArray(urls)) return { ok: false, error: 'Nothing to probe' };
+  const { urls: list, skipped } = replayCandidates(urls.slice(0, 10000).map(String), siteOf, host);
+  const send = list.slice(0, MAX_PROBE);
+  if (!send.length) return { ok: true, queued: 0, skipped: { ...skipped, limit: list.length - send.length } };
+  const data = await getHost(host);
+  data.probes ||= {};
+  for (const u of send) {
+    data.probes[u] = { status: 'pending', at: Date.now() };
+    enqueue({ kind: 'probe', host, id: u, url: u });
+  }
+  markDirty(host);
+  return { ok: true, queued: send.length, skipped: { ...skipped, limit: list.length - send.length } };
+}
+
+async function probeRequest(job) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 20000);
+  let rec;
+  try {
+    const res = await fetch(job.url, { method: 'GET', credentials: 'include', cache: 'no-store', redirect: 'manual', signal: ctrl.signal });
+    rec = res.type === 'opaqueredirect' ? { status: 0, redirect: true } : { status: res.status };
+  } catch (e) {
+    rec = { status: 0, error: e && e.name === 'AbortError' ? 'timeout' : 'error' };
+  } finally {
+    clearTimeout(timer);
+  }
+  const data = await getHost(job.host);
+  data.probes ||= {};
+  data.probes[job.url] = { ...rec, at: Date.now() };
+  markDirty(job.host);
 }
 
 // ── Wayback Machine: historical JS and source maps (manual button, or automatic when enabled) ──
@@ -1353,6 +1394,7 @@ const HANDLERS = {
   'runtime-collect': onRuntimeCollect,
   wayback: waybackLookup,
   replay: replayToProxy,
+  probe: probeEndpoints,
   rescan,
   'scan-urls': scanUrls,
   'scan-text': scanPastedText,

@@ -438,6 +438,7 @@ function linkRow(f) {
     head(
       h('span', { class: 'value mono', title: shown }, shown),
       chips(f.tags),
+      probeChip(openUrl),
       h('span', { class: 'spacer' }),
       srcSummary(f),
       isHttp(openUrl) && !openUrl.includes('${') ? btn('Open', openUrl, () => chrome.tabs.create({ url: openUrl, active: false })) : null,
@@ -499,6 +500,7 @@ function apiRow(f) {
       h('span', { class: `method m-${m}` }, method),
       h('span', { class: 'value mono', title: shown }, shown),
       chips(f.tags),
+      method === 'GET' ? probeChip(abs) : null,
       h('span', { class: 'spacer' }),
       srcSummary(f),
       canCurl ? btn('curl', 'Copy as curl command', () => copy(curlFor(method, abs), 'curl command copied')) : null,
@@ -518,6 +520,7 @@ function routeRow(f) {
       h('span', { class: 'value mono', title: f.value }, f.value),
       sub ? h('span', { class: 'src mono', title: f.meta?.guard ? `guard: ${f.meta.guard}` : '' }, sub) : null,
       chips(f.tags),
+      openUrl ? probeChip(openUrl) : null,
       h('span', { class: 'spacer' }),
       srcSummary(f),
       openUrl && isHttp(openUrl) ? btn('Open', openUrl, () => chrome.tabs.create({ url: openUrl, active: false })) : null,
@@ -1070,6 +1073,62 @@ async function runReplay() {
 
 const absoluteUrls = () => [...new Set(endpointPaths().map(resolveUrl).filter((u) => isHttp(u) && !u.includes('${')))].sort();
 
+// ── endpoint liveness (opt-in, same-site) ──
+function probeUrls() {
+  const urls = [...absoluteUrls(), ...routePaths().map(resolveUrl)].filter(isHttp);
+  return replayCandidates(urls, siteOf, ui.host);
+}
+
+let probeArmed = 0;
+const PROBE_LABEL = 'Check which endpoints are live… ';
+
+/** Two clicks, same safe same-site GET candidates as the proxy sender, but the status is recorded. */
+async function runProbe() {
+  if (!ui.data) return toast('Nothing to probe');
+  const { urls, skipped } = probeUrls();
+  const item = $('#probeItem');
+  if (!urls.length) {
+    $('#exportMenu').open = false;
+    return toast('No concrete same-site GET URLs for this host');
+  }
+  if (Date.now() - probeArmed > 6000) {
+    probeArmed = Date.now();
+    item.firstChild.textContent = `Send ${urls.length} same-site GET${urls.length > 1 ? 's' : ''} and read status? Click again `;
+    setTimeout(() => {
+      if (probeArmed && Date.now() - probeArmed >= 6000) item.firstChild.textContent = PROBE_LABEL;
+    }, 6100);
+    return;
+  }
+  probeArmed = 0;
+  item.firstChild.textContent = PROBE_LABEL;
+  $('#exportMenu').open = false;
+  const r = await chrome.runtime.sendMessage({ type: 'probe', host: ui.host, urls });
+  if (!r?.ok) return toast(r?.error || 'Failed');
+  const skip = skipped.unsafe + skipped.template + (r.skipped?.limit || 0);
+  toast(`Probing ${r.queued} same-site endpoint${r.queued === 1 ? '' : 's'}${skip ? ` · skipped ${skip}` : ''}`);
+  pollStatus();
+}
+
+// status code → a short labelled chip on endpoint / API / route rows
+function probeChip(absUrl) {
+  if (!ui.data?.probes || !absUrl) return null;
+  let key = absUrl;
+  try {
+    key = new URL(absUrl).href;
+  } catch {
+    /* use as-is */
+  }
+  const p = ui.data.probes[key] || ui.data.probes[absUrl];
+  if (!p) return null;
+  if (p.status === 'pending') return h('span', { class: 'chip probe pending', title: 'Probing…' }, '…');
+  if (p.redirect) return h('span', { class: 'chip probe redir', title: 'Redirects (often to login)' }, '3xx');
+  const s = p.status;
+  if (!s) return h('span', { class: 'chip probe err', title: p.error || 'No response' }, 'ERR');
+  const cls = s >= 200 && s < 300 ? 'ok' : s === 401 || s === 403 ? 'auth' : s === 404 || s === 410 ? 'gone' : s >= 500 ? 'err' : 'other';
+  const title = s === 401 || s === 403 ? 'Exists but protected — worth testing' : s === 405 ? 'Exists (method not allowed for GET)' : s >= 200 && s < 300 ? 'Live' : '';
+  return h('span', { class: `chip probe ${cls}`, title }, String(s));
+}
+
 // Concrete client-side route paths (no :params or wildcards) → a path wordlist of real SPA pages.
 function routePaths() {
   return [
@@ -1175,6 +1234,7 @@ async function runWayback() {
 
 async function doExport(kind) {
   if (kind === 'replay') return runReplay(); // keeps the menu open for the confirmation click
+  if (kind === 'probe') return runProbe(); // two-click confirm, menu stays open
   $('#exportMenu').open = false;
   if (kind === 'dump') return openDump();
   if (kind === 'wayback') return runWayback();

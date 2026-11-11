@@ -1476,6 +1476,29 @@ a.value {
   border-style: dashed;
 }
 
+/* endpoint liveness status */
+.chip.probe {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+.chip.probe.ok {
+  --c: var(--ok);
+}
+.chip.probe.auth {
+  --c: var(--medium);
+}
+.chip.probe.redir,
+.chip.probe.other {
+  --c: var(--blue);
+}
+.chip.probe.err {
+  --c: var(--critical);
+}
+.chip.probe.gone,
+.chip.probe.pending {
+  --c: var(--muted);
+}
+
 /* expanded detail */
 .detail {
   display: flex;

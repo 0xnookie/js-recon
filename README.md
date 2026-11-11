@@ -66,6 +66,7 @@ Modern web apps ship their attack surface to the browser: API routes, feature fl
 - **GraphQL schema sketch**: types, root fields with argument types, unions / interfaces and input types inferred from the operations and fragments in the client, exported as `.graphql` together with every operation.
 - **OpenAPI 3 / Postman v2.1 exports**: methods, path and query parameters, request bodies from the runtime hooks, custom headers, bearer auth and GraphQL operations. For Burp (API scan, or the OpenAPI Parser extension in Community), Caido (ReDocs plugin), ZAP, Postman and Insomnia.
 - **Send GET URLs to proxy** (active, two clicks): requests each concrete, harmless-looking same-site GET URL once, so it lands in the site map of the proxy your browser uses.
+- **Endpoint liveness** (active, two clicks): sends the same safe same-site GET requests and records the HTTP status next to each endpoint, API and route — telling live (200), **protected (401 / 403, worth testing)**, wrong-method (405), redirecting (3xx) and dead (404) apart. GET only, same site only, capped, never cross-site.
 - **Wordlists** per input kind (params, body fields, headers, cookies, storage keys, paths, path segments, URLs, subdomains), ready for ffuf, Arjun, x8 and Param Miner.
 - **Historical JS from the Wayback Machine**: one archived file per distinct script first, sensitive names and source maps first, libraries last.
 - A **static-file dumper** that zips every JS file, `.map` file and reconstructed source tree of one or more hosts for grep, semgrep or trufflehog.

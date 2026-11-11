@@ -357,6 +357,29 @@ await drain();
 const replayed = fetched.slice(beforeReplay);
 check(rp?.ok && rp.queued === 1 && JSON.stringify(replayed) === JSON.stringify(['https://app.acme.test/api/v1/reports']), `only the concrete, harmless same-site GET sent (${replayed.join(', ')})`);
 
+console.log('\nEndpoint liveness');
+FILES['https://app.acme.test/api/live'] = { body: 'ok' };
+FILES['https://app.acme.test/api/admin'] = { body: 'forbidden', status: 403 };
+const pb = await send({
+  type: 'probe',
+  host: 'app.acme.test',
+  urls: [
+    'https://app.acme.test/api/live', // 200
+    'https://app.acme.test/api/admin', // 403
+    'https://app.acme.test/api/missing', // 404 (not in FILES)
+    'https://app.acme.test/logout', // unsafe → skipped
+    'https://app.acme.test/api/{id}', // placeholder → skipped
+    'https://evil.example/x', // offsite → skipped
+  ],
+});
+await drain();
+const probes = mem['host:app.acme.test'].probes || {};
+check(pb?.ok && pb.queued === 3, `probe queued only the 3 safe same-site GETs (queued ${pb?.queued})`);
+check(probes['https://app.acme.test/api/live']?.status === 200, 'live endpoint → 200');
+check(probes['https://app.acme.test/api/admin']?.status === 403, 'protected endpoint → 403');
+check(probes['https://app.acme.test/api/missing']?.status === 404, 'missing endpoint → 404');
+check(!probes['https://app.acme.test/logout'] && !probes['https://evil.example/x'], 'unsafe and offsite endpoints not probed');
+
 const cdxBackup = FILES.cdx;
 FILES.cdx = { ...cdxBackup, status: 503, body: '<html>Internet Archive: Temporarily Offline</html>', type: 'text/html' };
 const wbDown = await send({ type: 'wayback', host: 'app.acme.test' });
