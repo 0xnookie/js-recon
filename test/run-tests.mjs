@@ -596,6 +596,93 @@ console.log('\nOffline enrichment (AWS account ID, example triage)');
   check(looksLikeExample('aaaaa_secret_value'), 'repeated run → example');
   check(exampleSignals('ghp_R3dStr1keQw9pLmZx7bN2vK4tH8cF6dA1eU0').length === 0, 'genuine high-entropy token not flagged');
   check(!looksLikeExample('k9Qm2vX7bR4tLp8aZ6cH3dNj5sYg1wF0'), 'realistic high-entropy value not flagged');
+
+  const gcpSa = `const creds = {
+    "type": "service_account",
+    "project_id": "acme-prod-9f2a",
+    "private_key_id": "a1b2c3d4e5f6",
+    "client_email": "svc@acme-prod-9f2a.iam.gserviceaccount.com",
+    "client_id": "109876543210"
+  };`;
+  const sa = analyze(gcpSa, rules).find((f) => f.rule === 'gcp-service-account');
+  check(sa?.meta?.project === 'acme-prod-9f2a', 'GCP service account → project id (offline)');
+  check(sa?.meta?.['service account'] === 'svc@acme-prod-9f2a.iam.gserviceaccount.com', 'GCP service account → email');
+
+  const fbCode = `const firebaseConfig = {
+    apiKey: "AIzaSyD9x2Qm7bR4tLp8aZ6cH3dNj5sYg1wF0kQ",
+    authDomain: "acme-app.firebaseapp.com",
+    projectId: "acme-app",
+    messagingSenderId: "123456789012",
+    appId: "1:123456789012:web:abcdef"
+  };`;
+  const fk = analyze(fbCode, rules).find((f) => f.rule === 'gcp-api-key');
+  check(fk?.tags?.includes('firebase'), 'Google API key near Firebase config tagged firebase');
+  check(fk?.meta?.project === 'acme-app', 'Firebase key → project id (offline)');
+  const bareKey = analyze('const k = "AIzaSyD9x2Qm7bR4tLp8aZ6cH3dNj5sYg1wF0kQ";', rules).find((f) => f.rule === 'gcp-api-key');
+  check(bareKey && !bareKey.tags?.includes('firebase'), 'Google API key with no Firebase config not tagged firebase');
+}
+
+console.log('\nJWT expiry triage (offline)');
+{
+  const { jwtExpiryTag } = await import('../src/rules.js');
+  const nowS = Math.floor(Date.now() / 1000);
+  check(jwtExpiryTag(nowS - 3600) === 'expired', 'past exp → expired');
+  check(jwtExpiryTag(nowS + 3 * 24 * 3600) === 'expires-soon', 'exp in 3 days → expires-soon');
+  check(jwtExpiryTag(nowS + 60 * 24 * 3600) === null, 'exp far future → no tag');
+  check(jwtExpiryTag(undefined) === null && jwtExpiryTag('x') === null, 'missing / non-numeric exp → no tag');
+  const b64u = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
+  const expiredTok = `${b64u({ alg: 'HS256', typ: 'JWT' })}.${b64u({ sub: '123', exp: nowS - 100 })}.sig`;
+  const jf = analyze(`const t = "${expiredTok}";`, rules).find((f) => f.rule === 'jwt');
+  check(jf?.tags?.includes('expired'), 'expired JWT finding tagged expired');
+  const liveTok = `${b64u({ alg: 'HS256', typ: 'JWT' })}.${b64u({ sub: '123', exp: nowS + 90 * 24 * 3600 })}.sig`;
+  const jf2 = analyze(`const t = "${liveTok}";`, rules).find((f) => f.rule === 'jwt');
+  check(jf2 && !jf2.tags?.includes('expired') && !jf2.tags?.includes('expires-soon'), 'long-lived JWT not tagged expired');
+}
+
+console.log('\nNew provider token rules');
+{
+  const H = (n) => 'a1b2c3d4e5f60718293a4b5c6d7e8f90'.repeat(4).slice(0, n);
+  const A = (n) => 'k9Qm2vX7bR4tLp8aZ6cH3dNj5sYg1wF0kQ2bN7cJ4dP6'.repeat(3).slice(0, n);
+  // Provider prefixes are split across concatenation so no complete token is a literal here
+  // (keeps GitHub secret-scanning push protection from flagging the test file).
+  const toks = {
+    openrouter: 'sk-' + 'or-v1-' + H(64),
+    perplexity: 'pp' + 'lx-' + A(48),
+    tailscale: 'tskey' + '-auth-' + 'k9Qm2vX7bR4t' + '-' + 'Lp8aZ6cH3dNj5sYg1wF0kQ',
+    planetscale: 'pscale' + '_tkn_' + A(34),
+    databricks: 'da' + 'pi' + H(32),
+    'terraform-cloud': 'k9Qm2vX7bR4tLp' + '.atlasv1.' + A(64),
+    figma: 'fig' + 'd_' + A(44),
+    'sentry-auth': 'sntr' + 'ys_' + A(60),
+  };
+  const blob = Object.values(toks).map((t) => `x="${t}";`).join(' ');
+  const found = new Set(analyze(blob, rules).map((f) => f.rule));
+  for (const id of Object.keys(toks)) check(found.has(id), `new rule: ${id}`);
+}
+
+console.log('\nSARIF export');
+{
+  const { buildSarif } = await import('../src/exporters.js');
+  const sarif = buildSarif({
+    host: 'acme.test',
+    version: '1.5.0',
+    findings: [
+      { rule: 'aws-access-key', label: 'AWS Access Key ID', severity: 'high', value: 'AKIA-x', category: 'secrets', desc: 'd', locations: [{ uri: 'https://acme.test/app.js', line: 12, col: 4 }] },
+      { rule: 'aws-access-key', label: 'AWS Access Key ID', severity: 'high', value: 'AKIA-y', category: 'secrets', locations: [] },
+      { rule: 'taint-innerhtml', label: 'DOM XSS', severity: 'medium', value: 'x -> innerHTML', category: 'sinks', locations: [{ uri: 'https://acme.test/b.js', line: 3 }] },
+    ],
+  });
+  check(sarif.version === '2.1.0' && sarif.$schema.includes('sarif-2.1.0'), 'SARIF 2.1.0 envelope');
+  const run = sarif.runs[0];
+  check(run.tool.driver.name === 'JS Recon' && run.tool.driver.version === '1.5.0', 'tool driver name + version');
+  check(run.tool.driver.rules.length === 2, 'rules de-duplicated by id');
+  check(run.tool.driver.rules[0].defaultConfiguration.level === 'error', 'rule default level from severity');
+  check(run.results.length === 3, 'one result per finding');
+  check(run.results[0].level === 'error' && run.results[2].level === 'warning', 'severity → SARIF level');
+  const reg = run.results[0].locations[0].physicalLocation.region;
+  check(reg.startLine === 12 && reg.startColumn === 4, 'location line + column preserved');
+  check(!run.results[1].locations, 'finding without a location omits locations');
+  check(run.results[2].locations[0].physicalLocation.region.startColumn === undefined, 'line without column is fine');
 }
 
 console.log('\nCloud providers');

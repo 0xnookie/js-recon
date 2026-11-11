@@ -220,3 +220,61 @@ export function replayCandidates(urls, siteOf, host) {
   }
   return { urls: out, skipped };
 }
+
+// ── SARIF 2.1.0 (for CI code-scanning, GitHub/GitLab security tabs, ZAP, DefectDojo) ──
+//
+// Input: { host, version, findings: [{ rule, label, severity, value, category, desc?,
+//          locations: [{ uri, line?, col? }] }] }. Locations are already resolved by the caller.
+
+const SARIF_LEVEL = { critical: 'error', high: 'error', medium: 'warning', low: 'note', info: 'note' };
+
+export function buildSarif({ host, version, findings = [] } = {}) {
+  const rulesMap = new Map();
+  const results = [];
+  for (const f of findings) {
+    const level = SARIF_LEVEL[f.severity] || 'note';
+    if (!rulesMap.has(f.rule)) {
+      rulesMap.set(f.rule, {
+        id: f.rule,
+        name: f.label || f.rule,
+        shortDescription: { text: f.label || f.rule },
+        ...(f.desc ? { fullDescription: { text: f.desc } } : {}),
+        defaultConfiguration: { level },
+        properties: { category: f.category, tags: f.category ? [f.category] : [] },
+      });
+    }
+    const locations = (f.locations || [])
+      .filter((l) => l && l.uri)
+      .map((l) => ({
+        physicalLocation: {
+          artifactLocation: { uri: l.uri },
+          ...(l.line ? { region: { startLine: l.line, ...(l.col ? { startColumn: l.col } : {}) } } : {}),
+        },
+      }));
+    results.push({
+      ruleId: f.rule,
+      level,
+      message: { text: `${f.label || f.rule}: ${f.value ?? ''}` },
+      ...(locations.length ? { locations } : {}),
+      ...(f.value ? { partialFingerprints: { 'jsrecon/v1': `${f.rule}:${f.value}` } } : {}),
+    });
+  }
+  return {
+    $schema: 'https://json.schemastore.org/sarif-2.1.0.json',
+    version: '2.1.0',
+    runs: [
+      {
+        tool: {
+          driver: {
+            name: 'JS Recon',
+            informationUri: 'https://github.com/0xnookie/js-recon',
+            version: version || '0.0.0',
+            rules: [...rulesMap.values()],
+          },
+        },
+        ...(host ? { automationDetails: { id: `js-recon/${host}` } } : {}),
+        results,
+      },
+    ],
+  };
+}

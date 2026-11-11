@@ -3,7 +3,7 @@ import { DEV_HOST_RE, CLOUD_HOST_RE, interestingParam } from '../src/rules.js';
 import { getSettings, saveSettings } from '../src/settings.js';
 import { sourcesZip, dumpHosts, canRebuild } from './dump.js';
 import { ZipWriter } from '../src/zip.js';
-import { buildOpenApi, buildPostman, replayCandidates } from '../src/exporters.js';
+import { buildOpenApi, buildPostman, buildSarif, replayCandidates } from '../src/exporters.js';
 import { parseDefinition, schemaSketch } from '../src/graphql.js';
 
 const params = new URLSearchParams(location.search);
@@ -300,7 +300,7 @@ function filtered(tab) {
   const minSev = ui.sev === 'all' ? -1 : SEV_RANK[ui.sev];
   return items.filter((f) => {
     if (SEV_TABS.has(tab) && (SEV_RANK[f.severity] || 0) < minSev) return false;
-    if (tab === 'secrets' && ui.hideTentative && f.confidence === 'tentative') return false;
+    if (tab === 'secrets' && ui.hideTentative && (f.confidence === 'tentative' || f.tags?.includes('example'))) return false;
     if (ui.hideNoise && NOISE_TABS.has(tab) && f.tags?.some((t) => t === 'noise' || t === 'static')) return false;
     if (ui.onlyInteresting && INTERESTING_TABS.has(tab) && !f.tags?.includes('interesting')) return false;
     if (ui.onlyNew && tab !== 'files' && !f.tags?.includes('new')) return false;
@@ -984,6 +984,42 @@ function textReport() {
   return out.join('\n');
 }
 
+/** Markdown version of the report — pastes cleanly into tickets, PRs and wikis. */
+function mdReport() {
+  const m = ui.model;
+  const esc = (s) => String(s ?? '').replace(/\|/g, '\\|').replace(/\s+/g, ' ').trim();
+  const tagsOf = (f) => (f.tags?.length ? ` _(${f.tags.join(', ')})_` : '');
+  const out = [`# JS Recon — ${ui.host}`, '', `_Generated ${new Date().toISOString()}_`, ''];
+  const section = (title, rows) => {
+    if (rows.length) out.push(`## ${title} (${rows.length})`, '', ...rows, '');
+  };
+  section('Secrets', m.secrets.map((f) => `- **[${f.severity}${f.confidence ? '/' + f.confidence : ''}]** ${esc(f.label)}: \`${esc(f.value)}\`${tagsOf(f)}`));
+  section('DOM-XSS sinks', m.sinks.map((f) => `- ${esc(f.label)}: \`${esc(f.value)}\``));
+  section('API endpoints', m.api.map((f) => `- \`${apiParts(f).method} ${esc(f.meta?.graphql ? apiParts(f).path + ' (GraphQL)' : resolveUrl(apiParts(f).path))}\``));
+  section('Routes', m.routes.map((f) => `- \`${esc(f.value)}\`${tagsOf(f)}`));
+  section('Cloud', m.cloud.map((f) => `- **[${f.severity}]** ${esc(f.label)}: \`${esc(f.value)}\``));
+  section('Dependencies', m.deps.map((f) => `- **[${f.severity}]** \`${esc(f.value)}\` — ${esc(f.label)}`));
+  section('Intel', m.intel.map((f) => `- **[${f.severity}]** ${esc(f.label)}: ${esc(f.value)}`));
+  section('Domains', m.domains.map((d) => `- \`${esc(d.value)}\`${tagsOf(d)}`));
+  return out.join('\n');
+}
+
+/** Normalised findings (security tabs only) with resolved source locations, for the SARIF export. */
+function sarifModel() {
+  const m = ui.model;
+  const loc = (f) =>
+    (f.sources || [])
+      .map((s) => ({ uri: String(s.file || '').replace(/ \[inline source map\]$/, ''), line: s.line, col: s.col }))
+      .filter((l) => l.uri);
+  const findings = [];
+  for (const tab of ['secrets', 'sinks', 'intel', 'cloud', 'deps']) {
+    for (const f of m[tab] || []) {
+      findings.push({ rule: f.rule || tab, label: f.label || tab, severity: f.severity || 'info', value: f.value, category: f.category || tab, desc: f.desc, locations: loc(f) });
+    }
+  }
+  return { host: ui.host, version: chrome.runtime.getManifest().version, findings };
+}
+
 /** Endpoint + API paths of the current host (relative or absolute, noise and static files excluded). */
 function endpointPaths() {
   return [
@@ -1247,6 +1283,8 @@ async function doExport(kind) {
   const base = `jsrecon-${safeName(ui.host)}`;
   if (kind === 'json') download(`${base}-${stamp()}.json`, JSON.stringify(exportJson(ui.data), null, 2), 'application/json');
   if (kind === 'txt') download(`${base}-${stamp()}.txt`, textReport());
+  if (kind === 'md') download(`${base}-${stamp()}.md`, mdReport(), 'text/markdown');
+  if (kind === 'sarif') download(`${base}-${stamp()}.sarif`, JSON.stringify(buildSarif(sarifModel()), null, 2), 'application/json');
   if (kind === 'urls') download(`${base}-urls-${stamp()}.txt`, absoluteUrls().join('\n'));
   if (kind === 'wordlists') await exportWordlists();
   if (kind === 'graphql') exportGraphql();

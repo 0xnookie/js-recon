@@ -15,7 +15,7 @@ import { entropy, decodeJwt, SEV_RANK } from './util.js';
 import { graphqlAt } from './graphql.js';
 import { routeInfo } from './routes.js';
 import { taintAt } from './taint.js';
-import { enrichAwsKey } from './enrich.js';
+import { enrichAwsKey, enrichGcpServiceAccount, enrichFirebaseKey } from './enrich.js';
 
 export const CATEGORY_LABELS = {
   secrets: 'Secrets',
@@ -104,6 +104,15 @@ function taintPost(mode, sink, severity) {
   };
 }
 
+/** Offline triage of a JWT `exp` claim (seconds since epoch): 'expired', 'expires-soon' (≤7d), or null. */
+export function jwtExpiryTag(exp, now = Date.now()) {
+  if (typeof exp !== 'number' || !isFinite(exp)) return null;
+  const ms = exp * 1000 - now;
+  if (ms <= 0) return 'expired';
+  if (ms <= 7 * 24 * 3600 * 1000) return 'expires-soon';
+  return null;
+}
+
 function classifyJwt(v) {
   const d = decodeJwt(v);
   if (!d || !d.payload || typeof d.payload !== 'object') return null;
@@ -112,12 +121,16 @@ function classifyJwt(v) {
   for (const k of ['alg', 'kid', 'typ']) if (d.header[k] != null) meta[k] = d.header[k];
   for (const k of ['iss', 'sub', 'aud', 'role', 'scope', 'email', 'exp', 'iat']) if (p[k] != null) meta[k] = p[k];
   if (typeof p.exp === 'number') meta.expires = new Date(p.exp * 1000).toISOString();
-  if (p.role === 'service_role') return { severity: 'high', label: 'Supabase service_role JWT', meta };
+  const tags = [];
+  const et = jwtExpiryTag(p.exp);
+  if (et) tags.push(et);
+  const base = tags.length ? { meta, tags } : { meta };
+  if (p.role === 'service_role') return { ...base, severity: 'high', label: 'Supabase service_role JWT' };
   if (p.role === 'anon' && /supabase/i.test(String(p.iss || ''))) {
-    return { severity: 'info', category: I, label: 'Supabase anon key (JWT)', meta };
+    return { ...base, severity: 'info', category: I, label: 'Supabase anon key (JWT)' };
   }
-  if (String(d.header.alg).toLowerCase() === 'none') return { label: 'JWT (alg: none)', meta };
-  return { meta };
+  if (String(d.header.alg).toLowerCase() === 'none') return { ...base, label: 'JWT (alg: none)' };
+  return base;
 }
 
 const DB_SCHEMES = /^(?:mongodb(?:\+srv)?|postgres(?:ql)?|mysql|mariadb|redis|rediss|amqps?|mssql|sqlserver|couchdb|neo4j(?:\+s)?|clickhouse|jdbc:[a-z0-9]+):/i;
@@ -701,9 +714,11 @@ export const RULES = [
     { desc: 'Try cognito-identity get-id / get-credentials-for-identity to obtain unauthenticated AWS credentials.' }),
   rule('gcp-oauth-secret', 'Google OAuth Client Secret', S, 'high', /\bGOCSPX-[A-Za-z0-9_-]{28}(?![A-Za-z0-9_-])/g),
   rule('gcp-api-key', 'Google API Key', S, 'medium', /\bAIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])/g,
-    { desc: 'Check which Google APIs accept it (Maps, Places, Gemini, Firebase…) — e.g. with gmapsapiscanner or keyhacks.' }),
+    { post: (v, m, ctx) => enrichFirebaseKey(ctx.code, ctx.index) || true,
+      desc: 'Check which Google APIs accept it (Maps, Places, Gemini, Firebase…) — e.g. with gmapsapiscanner or keyhacks.' }),
   rule('gcp-oauth-token', 'Google OAuth Access Token', S, 'high', /\bya29\.[0-9A-Za-z_-]{20,}/g),
-  rule('gcp-service-account', 'GCP Service Account Key (JSON)', S, 'high', /["']type["']\s*:\s*["']service_account["']/g),
+  rule('gcp-service-account', 'GCP Service Account Key (JSON)', S, 'high', /["']type["']\s*:\s*["']service_account["']/g,
+    { post: (v, m, ctx) => enrichGcpServiceAccount(ctx.code, ctx.index) || true }),
   rule('firebase-fcm', 'Firebase Cloud Messaging Server Key', S, 'high', /\bAAAA[A-Za-z0-9_-]{7}:APA91b[A-Za-z0-9_-]{134}/g),
   rule('azure-storage-conn', 'Azure Storage Connection String', S, 'high',
     /DefaultEndpointsProtocol=https?;AccountName=[^;"'`\s]{1,100};AccountKey=[A-Za-z0-9+/=]{86,88}/g),
@@ -731,6 +746,10 @@ export const RULES = [
     /(?:datadog|\bdd)[_-]?(?:api|app(?:lication)?)[_-]?key["'`]?\s*[:=]{1,3}\s*["'`]([a-f0-9]{32,40})["'`]/gi, { group: 1, generic: true }),
   rule('dynatrace', 'Dynatrace Token', S, 'high', /\bdt0c01\.[A-Z0-9]{24}\.[A-Z0-9]{64}\b/g),
   rule('contentful', 'Contentful Management Token', S, 'high', /\bCFPAT-[A-Za-z0-9_-]{43}\b/g),
+  rule('tailscale', 'Tailscale Auth Key', S, 'high', /\btskey-(?:auth|api|client|key|webhook)-[0-9A-Za-z]{10,}-[0-9A-Za-z]{18,}/g),
+  rule('planetscale', 'PlanetScale Token', S, 'high', /\bpscale_(?:tkn|pw|oauth)_[0-9A-Za-z._-]{32,}/g),
+  rule('databricks', 'Databricks PAT', S, 'high', /\bdapi[0-9a-f]{32}(?:-\d)?\b/g),
+  rule('terraform-cloud', 'Terraform Cloud Token', S, 'high', /\b[A-Za-z0-9]{14}\.atlasv1\.[A-Za-z0-9_-]{60,}/g),
 
   // ── Messaging / webhooks ──
   rule('slack-token', 'Slack Token', S, 'high', /\bxox[abposre]-[0-9A-Za-z-]{10,250}/g),
@@ -759,6 +778,8 @@ export const RULES = [
   rule('huggingface', 'Hugging Face Token', S, 'high', /\bhf_[A-Za-z0-9]{34,40}\b/g),
   rule('groq', 'Groq API Key', S, 'high', /\bgsk_[A-Za-z0-9]{52}\b/g),
   rule('replicate', 'Replicate API Token', S, 'high', /\br8_[A-Za-z0-9]{37}\b/g),
+  rule('openrouter', 'OpenRouter API Key', S, 'high', /\bsk-or-v1-[0-9a-f]{64}\b/g),
+  rule('perplexity', 'Perplexity API Key', S, 'high', /\bpplx-[0-9A-Za-z]{40,}(?![0-9A-Za-z])/g),
 
   // ── Social / SaaS ──
   rule('facebook-token', 'Facebook Access Token', S, 'medium', /\bEAA[A-Z][A-Za-z0-9]{80,}/g),
@@ -772,6 +793,7 @@ export const RULES = [
   rule('cloudinary', 'Cloudinary URL', S, 'high', /\bcloudinary:\/\/\d{15}:[A-Za-z0-9_-]+@[a-z0-9-]+/g),
   rule('airtable', 'Airtable Token', S, 'high', /\bpat[A-Za-z0-9]{14}\.[a-f0-9]{64}\b/g),
   rule('notion', 'Notion Integration Token', S, 'high', /\b(?:secret_[A-Za-z0-9]{43}|ntn_\d{11}[A-Za-z0-9]{35})\b/g),
+  rule('figma', 'Figma Access Token', S, 'high', /\bfigd_[0-9A-Za-z_-]{40,}(?![0-9A-Za-z_-])/g),
 
   // ── Crypto material / credentials ──
   rule('private-key', 'Private Key', S, 'high',
@@ -782,6 +804,7 @@ export const RULES = [
   rule('db-connection', 'Database Connection String', S, 'high',
     /\b(?:mongodb(?:\+srv)?|postgres(?:ql)?|mysql|mariadb|redis|rediss|amqps?|mssql|sqlserver|couchdb|neo4j(?:\+s)?|clickhouse|jdbc:[a-z0-9]{2,12}):\/\/[^\s"'`<>]{3,300}/gi,
     { post: dbConn }),
+  rule('sentry-auth', 'Sentry Auth Token', S, 'high', /\bsntr(?:ys|yu)_[0-9A-Za-z_-]{40,}(?![0-9A-Za-z_-])/g),
   rule('sentry-dsn', 'Sentry DSN', I, 'low', /https?:\/\/[a-f0-9]{32}(?::[a-f0-9]{32})?@[a-z0-9.-]{1,120}(?::\d+)?\/\d+/g,
     { post: (v) => (/:[a-f0-9]{32}@/.test(v) ? { severity: 'medium', category: S, label: 'Sentry DSN (with secret)' } : true) }),
   rule('basic-auth-url', 'Credentials in URL', S, 'high',

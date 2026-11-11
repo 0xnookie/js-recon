@@ -109,6 +109,52 @@ export function looksLikeExample(value) {
   return exampleSignals(value).length > 0;
 }
 
+// ─────────────────────── GCP / Firebase config enrichment ──────────────────────
+//
+// Both read a window of code around a match and pull out identifying fields that are already in
+// the page — no request is made. They answer "whose project is this?" offline.
+
+/** Value of a config field written as `"key": "v"`, `'key': 'v'` or `key: "v"` (first match in text). */
+function cfgField(text, key) {
+  const re = new RegExp('(?:["\']' + key + '["\']|\\b' + key + ')\\s*:\\s*["\']([^"\']{1,200})["\']', 'i');
+  const m = re.exec(text);
+  return m ? m[1] : null;
+}
+
+/** GCP service-account key JSON → owning project, service-account email and key id (offline). */
+export function enrichGcpServiceAccount(code, index) {
+  const win = String(code).slice(Math.max(0, index - 200), index + 1800);
+  const meta = {};
+  const project = cfgField(win, 'project_id');
+  const email = cfgField(win, 'client_email');
+  const keyId = cfgField(win, 'private_key_id');
+  const clientId = cfgField(win, 'client_id');
+  if (project) meta.project = project;
+  if (email) meta['service account'] = email;
+  if (keyId) meta['private_key_id'] = keyId;
+  if (clientId) meta.client_id = clientId;
+  return Object.keys(meta).length ? { meta } : null;
+}
+
+/** A Firebase/GCP web config near a Google API key → the project it belongs to (offline). */
+export function enrichFirebaseKey(code, index) {
+  const win = String(code).slice(Math.max(0, index - 600), index + 600);
+  if (!/firebase|authDomain|projectId|messagingSenderId|databaseURL|storageBucket/i.test(win)) return null;
+  const meta = {};
+  let project = cfgField(win, 'projectId');
+  const authDomain = cfgField(win, 'authDomain');
+  if (!project && authDomain) project = authDomain.replace(/\.firebaseapp\.com$/i, '').replace(/\.web\.app$/i, '');
+  const sender = cfgField(win, 'messagingSenderId');
+  const appId = cfgField(win, 'appId');
+  const dbUrl = cfgField(win, 'databaseURL');
+  if (project) meta.project = project;
+  if (authDomain) meta['auth domain'] = authDomain;
+  if (sender) meta['sender id'] = sender;
+  if (appId) meta['app id'] = appId;
+  if (dbUrl) meta['realtime db'] = dbUrl;
+  return { meta, tags: ['firebase'] };
+}
+
 // Local copy of the rules.js placeholder test, kept here so enrich.js stays dependency-free.
 const PLACEHOLDER_RE =
   /example|sample|dummy|placeholder|changeme|change[_-]me|your[_-]|insert[_-]|replace[_-]?me|x{5}|\*{4}|<[^>]*>|\$\{|\{\{|%s|process\.env|import\.meta/i;

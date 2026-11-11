@@ -42,6 +42,8 @@
           <div class="menu-list">
             <button data-export="json">JSON report <span class="hint">this host</span></button>
             <button data-export="txt">Text report <span class="hint">.txt</span></button>
+            <button data-export="md">Markdown report <span class="hint">tickets · PRs</span></button>
+            <button data-export="sarif" title="SARIF 2.1.0 for CI code-scanning: GitHub / GitLab security tabs, DefectDojo, ZAP. Secrets, sinks, intel, cloud and dependency findings with their source file + line.">SARIF <span class="hint">CI · code scanning</span></button>
             <button data-export="urls">Endpoints + API as URLs <span class="hint">ffuf / httpx</span></button>
             <button data-export="api">API endpoints <span class="hint">METHOD URL</span></button>
             <button data-export="wordlists">Wordlists <span class="hint">ffuf / Arjun · .zip</span></button>
@@ -131,7 +133,7 @@
         <option value="medium">≥ Medium</option>
         <option value="low">≥ Low</option>
       </select>
-      <label class="chk" id="tentativeWrap" title="Hide secrets whose value has low Shannon entropy"><input type="checkbox" id="hideTentative" /> Hide tentative</label>
+      <label class="chk" id="tentativeWrap" title="Hide low-value secrets: demo / example-looking values and those with low Shannon entropy (tentative)"><input type="checkbox" id="hideTentative" /> Hide low-value</label>
       <label class="chk" id="noiseWrap" title="Hide static assets (images, css, fonts) and library/documentation noise"><input type="checkbox" id="hideNoise" /> Hide noise</label>
       <label class="chk" id="interestingWrap" title="Only paths that look sensitive (admin, debug, upload, token, graphql …)"><input type="checkbox" id="onlyInteresting" /> Interesting</label>
       <label class="chk" id="newWrap" title="Only findings that first appeared in the latest version of the app's bundle" hidden><input type="checkbox" id="onlyNew" /> New</label>

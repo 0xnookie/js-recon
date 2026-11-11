@@ -1437,7 +1437,8 @@ a.value {
 
 .chip.interesting,
 .chip.no-httponly,
-.chip.guarded {
+.chip.guarded,
+.chip.expires-soon {
   --c: var(--medium);
 }
 
@@ -1456,7 +1457,8 @@ a.value {
 
 .chip.cloud,
 .chip.new,
-.chip.acct-known {
+.chip.acct-known,
+.chip.firebase {
   --c: var(--cyan);
 }
 
@@ -1471,7 +1473,8 @@ a.value {
 .chip.conf.tentative,
 .chip.noise,
 .chip.static,
-.chip.example {
+.chip.example,
+.chip.expired {
   --c: var(--muted);
 }
 
