@@ -270,29 +270,6 @@ test/               Node tests
 
 ---
 
-## 🗺️ Roadmap
-
-- ✅ **Secrets, API, endpoints, URLs, domains, cloud**: 142 rules, entropy confidence, Swagger-style methods
-- ✅ **Source maps**: follow, guess (opt-in), scan original sources, rebuild source trees as ZIP
-- ✅ **Dependency confusion**: npm package and scope checks
-- ✅ **Inputs**: query parameters, `data-*`, forms, headers, cookies, storage, including config-declared and minified reads
-- ✅ **Iframes**: embedded widgets' inline config
-- ✅ **Response headers**: CORS, CSP, cookies, banners, custom headers
-- ✅ **Lazy chunks**: webpack, Next.js, Vite, ES modules
-- ✅ **Observed traffic**: the API calls pages really make, with parameter and custom header names
-- ✅ **Runtime hooks (opt-in)**: names read at runtime, request body fields, message handlers
-- ✅ **postMessage analysis**: origin check, message types and sinks per handler
-- ✅ **Wordlist exports** per input kind for ffuf, Arjun, x8 and Param Miner
-- ✅ **Historical JS**: archived bundles and source maps from the Wayback Machine
-- ✅ **Change alerts**: redeploys detected per script family, new findings tagged and filterable, one notification per deploy
-- ✅ **GraphQL**: operations as API rows, schema sketch from operations and fragments
-- ✅ **Proxy exports**: OpenAPI 3 and Postman v2.1 (Burp, Caido, ZAP), "send GET URLs to proxy"
-- ⬜ **Diff view**: side-by-side list of what each recorded deploy added, with the old and new bundle
-- ⬜ **Secret validation (opt-in)**: check whether found keys are live against the provider's read-only endpoints
-- ⬜ **Team sync**: share a host's findings as a single file that another JS Recon instance can import
-
----
-
 ## 🛡️ Safety & Authorization
 
 JS Recon is for **authorized** security testing only: pentest engagements, bug-bounty programs within their scope, your own systems, CTFs and research.
