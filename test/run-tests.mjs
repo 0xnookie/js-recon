@@ -227,6 +227,10 @@ var schema = {paramType: "string", in: "query"};
   check(has('form', '__csrf', 'form-field')?.tags.includes('hidden'), 'hidden form field tagged "hidden"');
   has('form', 'q', 'form-field');
   check(!res.some((f) => f.category === 'params' && ['string', 'query'].includes(f.value)), 'type names in schemas are not parameters');
+  const ternary = analyze('typeof n==`string`?NR[e]=n.charAt(0):x;var o=i===`x`?r===`end`?1:2:3;e.type===`GEOGCS`?e.projName=`longlat`:0', rules);
+  check(!ternary.some((f) => f.category === 'params'), 'minified ternaries after a template literal are not "?param=" strings');
+  const concat = analyze('localStorage.getItem("jsr_" + k); Cookies.get("pre" + x); el.getAttribute("data-" + n); getUrlParam("ab" + c);', rules);
+  check(!concat.some((f) => f.category === 'params'), 'string fragments of a concatenation are not names');
   const cfg = res.find((f) => f.rule === 'global-config');
   check(cfg?.value === 'window.UTW_INJECTED_PARAMS' && /override_params/.test(cfg.meta?.keys), `injected config object with keys (${cfg?.meta?.keys})`);
   const ff = res.find((f) => f.rule === 'feature-flags');
@@ -317,6 +321,81 @@ console.log('\nLazy chunk discovery');
   const neg = urlsOf(`var s="/assets/"+name+".js";var t=cfg["x"]+"/"+y+".min.js";var o={a:"b"}[k]+"";`, 'https://acme.test/a.js');
   check(neg.length === 0, 'ordinary "+.js" string building is not a chunk map');
   check(findChunks(wp5, 'chrome-extension://x/a.js').length === 0, 'non-http base ignored');
+}
+
+console.log('\npostMessage handlers');
+{
+  const pm = analyze(
+    `
+window.addEventListener("message", function(e){ if (e.data.type === "render") document.getElementById("o").innerHTML = e.data.html; });
+window.addEventListener("message", (e) => { if (e.origin !== "https://app.acme.test") return; switch (e.data.action) { case "resize": f(); break; case "navigate": location.href = e.data.url; } });
+window.addEventListener('message', this.handleMessage.bind(this));
+class W { handleMessage(ev) { if (ev.origin.indexOf("acme.test") > -1) { localStorage.setItem("token", ev.data.token) } } }
+this._ws.addEventListener("message", this._onSocket); channel.port2.onmessage = function(){ tick() }; worker.addEventListener("message", g);
+`,
+    rules,
+  ).filter((f) => f.rule === 'postmessage-listener');
+  const by = (re) => pm.find((f) => re.test(f.value));
+  const unsafe = by(/types: render/);
+  check(unsafe?.severity === 'medium' && /not checked/.test(unsafe.value) && /HTML injection/.test(unsafe.value), `no origin check + innerHTML → medium (${unsafe?.value})`);
+  const safe = by(/types: resize, navigate/);
+  check(safe?.severity === 'info' && safe.meta.origin === 'checked' && safe.meta.sinks === 'navigation', `strict origin check, types + sinks listed (${safe?.value})`);
+  const weak = by(/weak/);
+  check(weak?.severity === 'low' && /storage write/.test(weak.value), `named handler resolved through .bind(this), substring origin check → weak (${weak?.value})`);
+  check(pm.length === 3, `WebSocket / MessagePort / Worker listeners ignored (${pm.length} handlers)`);
+}
+
+console.log('\nObserved requests');
+{
+  const { observedRequest, normalizePath } = await import('../src/requests.js');
+  check(normalizePath('/api/users/123/orders/550e8400-e29b-41d4-a716-446655440000') === '/api/users/{id}/orders/{uuid}', 'ids and uuids normalised');
+  check(normalizePath('/api/v2/files/5f8d0d55b54764421b7156c9/eyJhbGciOiJIUzI1NiJ9abc123') === '/api/v2/files/{id}/{token}', 'object ids and tokens normalised');
+  check(normalizePath('/api/feature-flags/new_checkout_flow') === '/api/feature-flags/new_checkout_flow', 'readable segments kept');
+  const res = observedRequest({
+    method: 'POST',
+    url: 'https://app.acme.test/api/v1/orders/42/refund?reason=dup&notify=1',
+    type: 'xmlhttprequest',
+    pageOrigin: 'https://app.acme.test',
+    requestHeaders: [
+      { name: 'Content-Type', value: 'application/json' },
+      { name: 'X-Tenant-Id', value: 'acme' },
+      { name: 'Authorization', value: 'Bearer eyJhbGciOi.secret.value' },
+      { name: 'sec-ch-ua', value: '"Edge"' },
+    ],
+  });
+  const api = res.find((f) => f.category === 'api');
+  check(api?.value === 'POST /api/v1/orders/{id}/refund?reason=&notify=' && api.tags.includes('observed') && api.tags.includes('interesting'), `observed API call → ${api?.value}`);
+  check(res.some((f) => f.meta?.kind === 'query' && f.value === 'reason'), 'query parameter names from observed request');
+  check(res.some((f) => f.meta?.kind === 'header' && f.value === 'X-Tenant-Id'), 'custom request header name');
+  const auth = res.find((f) => f.value === 'Authorization');
+  check(auth?.meta.example === 'Bearer …' && !JSON.stringify(res).includes('secret.value'), 'Authorization: scheme only, the token is never stored');
+  check(!res.some((f) => /content-type|sec-ch-ua/i.test(f.value)), 'standard and sec-* headers skipped');
+  const cross = observedRequest({ method: 'GET', url: 'https://api.acme-cloud.io/v2/me', type: 'xmlhttprequest', pageOrigin: 'https://app.acme.test' });
+  check(cross.find((f) => f.category === 'api')?.value === 'GET https://api.acme-cloud.io/v2/me', 'cross-origin calls keep their origin');
+  check(!observedRequest({ method: 'GET', url: 'https://app.acme.test/static/logo.svg', pageOrigin: 'https://app.acme.test' }).length, 'static files ignored');
+  const ws = observedRequest({ method: 'GET', url: 'wss://realtime.acme.test/socket/123', type: 'websocket' });
+  check(ws[0]?.value === 'wss://realtime.acme.test/socket/{id}' && ws[0].tags.includes('observed'), `WebSocket → ${ws[0]?.value}`);
+}
+
+console.log('\nWayback capture order');
+{
+  const { orderCaptures } = await import('../src/requests.js');
+  const order = orderCaptures([
+    ['timestamp', 'original'],
+    ['20260101000000', 'https://acme.test/chart/aaaa1111/iframe.js?revision=1'],
+    ['20260102000000', 'https://acme.test/chart/bbbb2222/iframe.js?revision=2'],
+    ['20260103000000', 'https://acme.test/chart/cccc3333/iframe.js?revision=3'],
+    ['20250101000000', 'https://acme.test/js/jquery.min.js'],
+    ['20240101000000', 'https://acme.test/static/js/main.4f2a91c.js'],
+    ['20230101000000', 'https://acme.test/static/js/main.9b8c7d6.js'],
+    ['20220101000000', 'https://acme.test/static/js/main.4f2a91c.js.map'],
+    ['20210101000000', 'https://acme.test/admin/app.js'],
+    ['bad', 'https://acme.test/x.js'],
+  ]).map((c) => c.original.replace('https://acme.test', ''));
+  check(order[0].endsWith('.map') && order[1] === '/admin/app.js', `source maps, then sensitive names first (${order.slice(0, 2).join(', ')})`);
+  check(order.slice(0, 4).filter((u) => u.startsWith('/chart/')).length === 1, 'one copy per script family before older versions');
+  check(order.at(-1) === '/js/jquery.min.js', 'well-known libraries last');
+  check(order.length === 8, 'malformed rows dropped');
 }
 
 console.log('\nclassifyLink');

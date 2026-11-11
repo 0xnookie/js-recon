@@ -513,6 +513,86 @@ function featureFlags(v, m) {
   };
 }
 
+// ── postMessage handlers ──
+
+export const POSTMESSAGE_DESC =
+  'Any website can send messages to this window (by opening it, or framing it if framing is allowed). Without a strict origin check, message data reaching an HTML, code or navigation sink is DOM XSS; reaching storage, requests or replies to "*" can leak or tamper with data.';
+
+const PM_SINKS = [
+  [/\.(?:inner|outer)HTML\s*\+?=(?!=)|\.insertAdjacentHTML\s*\(|\bdocument\.write(?:ln)?\s*\(|dangerouslySetInnerHTML|\.html\s*\(\s*[^)\s]/, 'HTML injection'],
+  [/\b(?:eval|Function)\s*\(|\bset(?:Timeout|Interval)\s*\(\s*[\w$.]*data\b/, 'code execution'],
+  [/\blocation(?:\.href)?\s*=(?!=)|\blocation\.(?:assign|replace)\s*\(|\bwindow\.open\s*\(/, 'navigation'],
+  [/(?<!location)\.(?:src|href|action)\s*=(?!=)|\.setAttribute\(\s*["'`](?:src|href|action|srcdoc)["'`]/, 'URL / attribute assignment'],
+  [/\b(?:local|session)Storage\.setItem\s*\(|\bdocument\.cookie\s*=(?!=)/, 'storage write'],
+  [/\bfetch\s*\(|XMLHttpRequest|\.ajax\s*\(|\baxios\b/, 'network request'],
+  [/\.postMessage\s*\([^;]{0,300}?,\s*["'`]\*["'`]/, 'replies to "*"'],
+];
+const DANGEROUS_SINKS = new Set(['HTML injection', 'code execution', 'navigation', 'URL / attribute assignment']);
+
+/** Text of the block starting at code[open] === "{" (string-aware brace matching). */
+function braceBlock(code, open, max = 30000) {
+  let depth = 0;
+  const end = Math.min(code.length, open + max);
+  for (let i = open; i < end; i++) {
+    const c = code[i];
+    if (c === '"' || c === "'" || c === '`') {
+      for (i++; i < end && code[i] !== c; i++) if (code[i] === '\\') i++;
+    } else if (c === '{') depth++;
+    else if (c === '}' && --depth === 0) return code.slice(open, i + 1);
+  }
+  return null;
+}
+
+/** Source of the handler passed at code[at…]: inline function / arrow, or a named function defined elsewhere. */
+function handlerSource(code, at) {
+  const head = code.slice(at, at + 300);
+  const fn = /^(?:async\s+)?(?:function\b[^(]{0,80}\([^)]{0,200}\)|\(?[\w$,\s]{0,80}\)?\s*=>)\s*/.exec(head);
+  if (fn) {
+    const i = at + fn[0].length;
+    if (code[i] === '{') return code.slice(at, i) + (braceBlock(code, i) || '');
+    return code.slice(at, at + 600).split(/\)\s*[,;]|\n/)[0]; // expression-bodied arrow
+  }
+  const ref = /^(?:this\.)?(?:[\w$]+\.)*([\w$]{3,60})(?:\.bind\([^)]{0,80}\))?\s*[,)]/.exec(head);
+  if (!ref) return null;
+  const n = ref[1].replace(/\$/g, '\\$');
+  const def = new RegExp(
+    `(?:function\\s+${n}\\s*\\([^)]{0,200}\\)\\s*|[\\s,{;.]${n}\\s*[:=]\\s*(?:async\\s+)?(?:function\\b[^(]{0,80}\\([^)]{0,200}\\)|\\(?[\\w$,\\s]{0,80}\\)?\\s*=>)\\s*|[\\s,{;}]${n}\\s*\\([^)]{0,200}\\)\\s*)\\{`,
+  ).exec(code);
+  if (!def) return null;
+  const open = def.index + def[0].length - 1;
+  return def[0].trim() + (braceBlock(code, open)?.slice(1) || '');
+}
+
+/**
+ * Classifies a message handler's source: how the sender's origin is checked, which message types it
+ * handles and which sinks the data can reach. Used for handlers in code and handlers captured at runtime.
+ */
+export function analyzeMessageHandler(src) {
+  const s = String(src || '');
+  let origin = 'not checked';
+  if (/\.origin\s*[!=]==?|[!=]==?\s*[\w$.]*\.origin\b|(?:allowed|trusted|valid|white|allow)\w*(?:Origins?|Hosts?|List)\w*\s*\.\s*(?:includes|has|indexOf)\s*\(\s*[\w$.]*\.origin|\.source\s*[!=]==?|[!=]==?\s*[\w$.]*\.source\b/i.test(s)) origin = 'checked';
+  else if (/\.test\(\s*[\w$.]*\.origin\s*\)|\.origin\s*\.\s*match\s*\(/.test(s)) origin = 'regex (check the anchoring)';
+  else if (/\.origin\s*\.\s*(?:indexOf|includes|startsWith|endsWith|search)\s*\(|\.origin\s*\)\s*\.\s*(?:indexOf|includes)|(?:indexOf|includes)\s*\(\s*[\w$.]*\.origin\s*\)/.test(s)) origin = 'weak (substring match)';
+  const types = new Set();
+  for (const m of s.matchAll(/\.(?:type|action|event|cmd|command|method|name|kind|op|messageType|eventName|topic)\s*[!=]==?\s*["'`]([\w:./@-]{1,60})["'`]/g)) types.add(m[1]);
+  for (const m of s.matchAll(/["'`]([\w:./@-]{1,60})["'`]\s*[!=]==?\s*[\w$.]*\.(?:type|action|event|cmd|command|method|name|kind|op)\b/g)) types.add(m[1]);
+  for (const m of s.matchAll(/\bcase\s*["'`]([\w:./@-]{1,60})["'`]\s*:/g)) types.add(m[1]);
+  const sinks = PM_SINKS.filter(([re]) => re.test(s)).map(([, name]) => name);
+  const dangerous = sinks.some((x) => DANGEROUS_SINKS.has(x));
+  const unsafe = origin !== 'checked';
+  const severity = unsafe ? (dangerous ? 'medium' : 'low') : 'info';
+  const label = unsafe ? (origin === 'not checked' ? 'postMessage handler without origin check' : 'postMessage handler with a weak origin check') : 'postMessage handler';
+  const t = [...types].slice(0, 12);
+  const value = `origin: ${origin} · types: ${t.length ? t.join(', ') : 'any'}${sinks.length ? ' · sinks: ' + sinks.join(', ') : ''}`;
+  return { value, severity, label, meta: { origin, types: t.join(', ') || '(not filtered)', sinks: sinks.join(', ') || '—' } };
+}
+
+function postMessageFinding(code, at) {
+  const src = handlerSource(code, at);
+  if (!src) return { value: 'handler defined elsewhere (not resolved)', label: 'postMessage handler', severity: 'info' };
+  return analyzeMessageHandler(src);
+}
+
 // ── misc intel ──
 
 const FILE_TLD_RE = /^(?:png|jpe?g|gif|svg|webp|ico|js|mjs|cjs|css|map|json|html?|txt|xml|woff2?|ttf|eot|mp[34]|tsx?|jsx|vue|scss|less|min|gz|zip)$/i;
@@ -733,8 +813,10 @@ export const RULES = [
     /(?:\/\/|\/\*+|<!--)[ \t]*(?:TODO|FIXME|HACK|XXX|BUG|SECURITY|TEMP|DEPRECATED)\b[^\n]{0,160}/g,
     { post: (v) => ({ value: v.replace(/\s*(?:\*\/|-->)[\s\S]*$/, '').trim() }) }),
   rule('html-comment', 'HTML Comment', I, 'info', /<!--([\s\S]{4,600}?)-->/g, { group: 1, post: htmlComment }),
-  rule('postmessage-listener', 'postMessage Listener', I, 'info',
-    /\baddEventListener\(\s*["'`]message["'`]|\bonmessage\s*=(?!=)/g, { post: ctxValue }),
+  // window message handlers only (not WebSocket / MessagePort / Worker): origin check, message types, sinks
+  rule('postmessage-listener', 'postMessage handler', I, 'info',
+    /(?:\b(?:window|self|top|globalThis)\s*\.\s*|(?<![\w$.]))addEventListener\(\s*["'`]message["'`]\s*,\s*|\b(?:window|self)\s*\.\s*onmessage\s*=(?!=)\s*/g,
+    { post: (v, m, ctx) => postMessageFinding(ctx.code, ctx.index + v.length), desc: POSTMESSAGE_DESC }),
   rule('postmessage-wildcard', 'postMessage with "*" targetOrigin', I, 'low',
     /\.postMessage\([^;]{0,300}?,\s*["'`]\*["'`]\s*\)/g, { post: ctxValue }),
 
@@ -759,9 +841,10 @@ export const RULES = [
     { post: (v, m) => inputFinding('query', m[1] || m[3]) }),
   // getParameterByName("x"), getUrlParam("x"), getQueryVariable("x")
   rule('param-getter', 'Query parameter read', 'params', 'info',
-    /\b(?:get(?:Url|URL|Query|Search|Request)?Param(?:eter)?(?:ByName|Value|FromUrl)?|getQuery(?:Variable|String|Value)|getUrlVars?|urlParam|queryParam|readParam)\(\s*(["'`])([A-Za-z_$][\w.[\]$-]{0,60})\1/g,
+    /\b(?:get(?:Url|URL|Query|Search|Request)?Param(?:eter)?(?:ByName|Value|FromUrl)?|getQuery(?:Variable|String|Value)|getUrlVars?|urlParam|queryParam|readParam)\(\s*(["'`])([A-Za-z_$][\w.[\]$-]{0,60})\1(?=\s*[,)])/g,
     { group: 2, post: (v) => inputFinding('query', v) }),
-  rule('param-string', 'Query parameter', 'params', 'info', /["'`][?&]([A-Za-z_][\w.[\]-]{0,40})=/g,
+  // an opening quote only: in `string`?x=… (minified ternary) the backtick closes a literal
+  rule('param-string', 'Query parameter', 'params', 'info', /(?<![\w$])["'`][?&]([A-Za-z_][\w.[\]-]{0,40})=/g,
     { group: 1, post: (v) => inputFinding('query', v) }),
   // /[?&]token=([^&]*)/
   rule('param-regex', 'Query parameter (regex)', 'params', 'info', /\[(?:\\{0,2}[?&#]){2,3}\]\)?([A-Za-z_][\w.-]{0,40})=/g,
@@ -771,13 +854,13 @@ export const RULES = [
     /["'`]?\b((?:[A-Za-z_$][\w$-]{0,60}?)?(?:param(?:eter)?(?:[_-]?(?:name|key))?|cookie[_-]?(?:name|key)|header[_-]?(?:name|key)|storage[_-]?key))["'`]?\s*(?::|=(?!=)|\|\|)\s*["'`]([^"'`\s]{1,80})["'`]/gi,
     { group: 2, post: paramFromConfig }),
   rule('data-attr', 'data-* attribute read', 'params', 'info',
-    /\.dataset\.([A-Za-z_$][\w$]{0,60})\b|\.dataset\[\s*(["'`])([\w-]{1,60})\2\s*\]|\b(?:get|has)Attribute\(\s*(["'`])(data-[\w-]{1,60})\4/g,
+    /\.dataset\.([A-Za-z_$][\w$]{0,60})\b|\.dataset\[\s*(["'`])([\w-]{1,60})\2\s*\]|\b(?:get|has)Attribute\(\s*(["'`])(data-[\w-]{1,60})\4(?=\s*[,)])/g,
     { post: (v, m) => inputFinding('data', m[1] || m[3] || m[5]) }),
   rule('storage-key', 'Web storage key', 'params', 'info',
-    /\b(local|session)Storage\s*(?:\.\s*(?:getItem|setItem|removeItem)\(\s*(["'`])([^"'`\s]{1,80})\2|\[\s*(["'`])([^"'`\s]{1,80})\4\s*\])/g,
+    /\b(local|session)Storage\s*(?:\.\s*(?:getItem|setItem|removeItem)\(\s*(["'`])([^"'`\s]{1,80})\2(?=\s*[,)])|\[\s*(["'`])([^"'`\s]{1,80})\4\s*\])/g,
     { post: (v, m) => inputFinding('storage', m[3] || m[5], m[1] === 'session' ? ['session'] : []) }),
   rule('cookie-name', 'Cookie', 'params', 'info',
-    /\bdocument\.cookie\s*=\s*(["'`])([^"'`\s=;]{1,60})=|(?:\b(?:get|read|set|remove|delete|has|erase)_?[Cc]ookie(?:Value)?|\bCookies?\.(?:get|set|remove)|\bcookies\(\)\.(?:get|set|has|delete)|\$\.(?:cookie|removeCookie))\(\s*(["'`])([^"'`\s=;,]{1,80})\3/g,
+    /\bdocument\.cookie\s*=\s*(["'`])([^"'`\s=;]{1,60})=|(?:\b(?:get|read|set|remove|delete|has|erase)_?[Cc]ookie(?:Value)?|\bCookies?\.(?:get|set|remove)|\bcookies\(\)\.(?:get|set|has|delete)|\$\.(?:cookie|removeCookie))\(\s*(["'`])([^"'`\s=;,]{1,80})\3(?=\s*[,)])/g,
     { post: (v, m) => inputFinding('cookie', m[2] || m[4]) }),
   rule('request-header', 'Request header', 'params', 'info',
     /\b(?:setRequestHeader|[Hh]eaders?\.(?:set|append|get|has))\(\s*(["'`])([A-Za-z][\w-]{1,60})\1|(["'`])(X-[A-Za-z][\w-]{1,60})\3/g,

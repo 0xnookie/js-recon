@@ -629,8 +629,8 @@ body.popup .brand span {
 }
 
 body.full .host-select {
-  max-width: 440px;
-  flex-basis: 440px;
+  max-width: 360px;
+  flex-basis: 360px;
 }
 
 .status {
@@ -1391,7 +1391,9 @@ a.value {
 
 .chip.same-site,
 .chip.on-npm,
-.chip.conf.certain {
+.chip.conf.certain,
+.chip.observed,
+.chip.runtime {
   --c: var(--ok);
 }
 

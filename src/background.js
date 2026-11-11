@@ -2,7 +2,8 @@
 // verifies discovered npm dependencies (dependency confusion).
 
 import { analyze } from './analyzer.js';
-import { buildRules, makeSubdomainRule, packageRoot, classifyLink, INTERESTING_RE } from './rules.js';
+import { buildRules, makeSubdomainRule, packageRoot, classifyLink, INTERESTING_RE, inputFinding, apiEndpoint, analyzeMessageHandler, POSTMESSAGE_DESC } from './rules.js';
+import { observedRequest, normalizePath, orderCaptures } from './requests.js';
 import { DEFAULT_SETTINGS, getSettings } from './settings.js';
 import { SEV_RANK, sha1, siteOf, hostMatches, hostOf, truncate } from './util.js';
 import { sourceMapRef, decodeDataUri, parseSourceMap, mapEntries, cleanSourcePath, probeCandidates } from './sourcemap.js';
@@ -12,6 +13,7 @@ import { analyzeHeaders } from './headers.js';
 const KEY = (host) => 'host:' + host;
 const MAX_SOURCES = 8;
 const LIGHT_CATEGORIES = new Set(['endpoints', 'urls', 'params', 'api', 'subdomains', 'deps']);
+const TAG_MERGE = new Set(['endpoints', 'urls', 'params', 'api', 'subdomains']);
 const JS_URL_RE = /\.m?js(?:[?#]|$)/i;
 const SCRIPT_KINDS = new Set(['script', 'crawled', 'chunk', 'manual']);
 const MAX_CHUNK_URLS = 5000; // discovered chunk URLs kept per host (for exports)
@@ -24,7 +26,46 @@ let readyPromise = null;
 function applySettings(settings) {
   state = { settings, rules: buildRules(settings), hostRules: new Map() };
   readyPromise = Promise.resolve(state);
+  syncRuntimeScript(settings);
   return state;
+}
+
+// ── runtime hooks (opt-in): src/runtime.js is registered into the page's own world only while enabled ──
+
+const RUNTIME_SCRIPT_ID = 'jsrecon-runtime';
+let runtimeSync = Promise.resolve();
+let runtimeSig = null;
+
+const matchPatterns = (hosts) =>
+  (hosts || []).flatMap((h) => {
+    const host = String(h).trim().toLowerCase().replace(/:\d+$/, '').replace(/^\*?\.+/, '').replace(/^\*\./, '');
+    return /^[a-z0-9.-]+$/.test(host) ? [`*://${host}/*`, `*://*.${host}/*`] : [];
+  });
+
+function syncRuntimeScript(s) {
+  const api = chrome.scripting;
+  if (!api?.registerContentScripts) return runtimeSync;
+  const want = s.enabled && s.runtimeHooks;
+  const sig = JSON.stringify([want, s.scopeMode, s.allowHosts, s.denyHosts]);
+  if (sig === runtimeSig) return runtimeSync;
+  runtimeSig = sig;
+  runtimeSync = runtimeSync.then(async () => {
+    try {
+      const existing = await api.getRegisteredContentScripts({ ids: [RUNTIME_SCRIPT_ID] });
+      if (existing.length) await api.unregisterContentScripts({ ids: [RUNTIME_SCRIPT_ID] });
+      if (!want) return;
+      // only where we'd scan anyway: the allow-list (if used), never the deny-list
+      const matches = s.scopeMode === 'allowlist' ? matchPatterns(s.allowHosts) : ['http://*/*', 'https://*/*'];
+      if (!matches.length) return;
+      const excludeMatches = matchPatterns(s.denyHosts);
+      await api.registerContentScripts([
+        { id: RUNTIME_SCRIPT_ID, js: ['src/runtime.js'], matches, ...(excludeMatches.length ? { excludeMatches } : {}), runAt: 'document_start', allFrames: true, world: 'MAIN', persistAcrossSessions: true },
+      ]);
+    } catch (e) {
+      console.warn('[JS Recon] runtime hooks', e);
+    }
+  });
+  return runtimeSync;
 }
 
 function ready() {
@@ -173,6 +214,8 @@ function mergeFindings(data, results, src) {
       if (r.desc) f.desc = r.desc;
       if (r.confidence) Object.assign(f, { confidence: r.confidence, entropy: r.entropy });
     }
+    // inputs, endpoints and hosts seen by several sources keep all their tags (e.g. "cors" + "observed")
+    if (TAG_MERGE.has(r.category)) for (const t of r.tags || []) if (!f.tags.includes(t)) f.tags = [...f.tags, t];
     if (r.category === 'deps' && r.meta?.evidence) {
       const ev = new Set([...(f.meta?.evidence || []), ...r.meta.evidence]);
       if (ev.size !== (f.meta?.evidence || []).length) {
@@ -313,6 +356,7 @@ async function runJob(job) {
   if (job.kind === 'sourcemap') return scanSourceMap(job);
   if (job.kind === 'text') return scanText(job);
   if (job.kind === 'npm') return checkDependency(job);
+  if (job.kind === 'wayback') return scanWayback(job);
 }
 
 // ───────────────────────── scanners ─────────────────────────
@@ -598,6 +642,105 @@ function discoverChunks(job, code, baseUrl, data) {
   }
 }
 
+// ── Wayback Machine: historical JS and source maps (manual button, or automatic when enabled) ──
+// Talks to web.archive.org only (never to the target) and sends it the host name.
+
+const WAYBACK_CDX = 'https://web.archive.org/cdx/search/cdx';
+const isMapUrl = (u) => /\.map(?:[?#]|$)/i.test(u);
+
+async function fetchArchive(url, maxBytes) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 60000);
+  try {
+    const res = await fetch(url, { credentials: 'omit', cache: 'force-cache', redirect: 'follow', signal: ctrl.signal });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const text = await res.text();
+    if (maxBytes && text.length > maxBytes) throw new Error('Too large');
+    return text;
+  } catch (e) {
+    if (e.name === 'AbortError') throw new Error('Timeout');
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function waybackLookup({ host, limit }) {
+  await ready();
+  if (!host) return { ok: false, error: 'No host' };
+  const s = state.settings;
+  const data = await getHost(host);
+  const max = Math.max(1, Math.min(2000, Number(limit) || s.waybackLimit || 100));
+  const q = new URLSearchParams({ url: `${host.replace(/:\d+$/, '')}/*`, output: 'json', fl: 'timestamp,original', collapse: 'urlkey', limit: '20000' });
+  q.append('filter', 'statuscode:200');
+  q.append('filter', 'original:.*\\.(?:m?js|map)(?:\\?.*)?$');
+  let rows;
+  try {
+    rows = JSON.parse((await fetchArchive(`${WAYBACK_CDX}?${q}`)) || '[]');
+  } catch (e) {
+    const msg = String(e.message || e);
+    const error = `Wayback Machine: ${/HTTP (?:429|5\d\d)|Timeout/.test(msg) ? msg + ' (archive.org is busy, try again later)' : msg}`;
+    data.wayback = { checked: Date.now(), error }; // the automatic lookup retries after an hour
+    markDirty(host);
+    return { ok: false, error };
+  }
+  const ordered = orderCaptures(rows);
+  const captures = ordered;
+  let queued = 0;
+  for (const c of ordered) {
+    if (queued >= max) break;
+    const id = `https://web.archive.org/web/${c.timestamp}id_/${c.original}`;
+    if (data.files[id] || data.files[c.original]?.status === 'done') continue; // already scanned (live or archived)
+    queued++;
+    enqueue({ kind: 'wayback', host, origin: data.origin, id, url: id, original: c.original, timestamp: c.timestamp });
+  }
+  data.wayback = { checked: Date.now(), captures: captures.length, queued };
+  markDirty(host);
+  return { ok: true, captures: captures.length, queued };
+}
+
+async function scanWayback(job) {
+  const data = await getHost(job.host, job.origin);
+  if (data.files[job.id]?.status === 'done') return;
+  const s = state.settings;
+  const ts = job.timestamp;
+  const label = `${job.original} (archived ${ts.slice(0, 4)}-${ts.slice(4, 6)}-${ts.slice(6, 8)})`;
+  let text;
+  try {
+    text = await fetchArchive(job.url, s.maxFileSizeMB * 4 * 1048576);
+  } catch {
+    return; // missing captures are common; don't list them
+  }
+  if (/^\s*</.test(text.slice(0, 200))) return; // archive error page instead of the file
+  const hash = await sha1(text);
+  if (data.hashes[hash]) return; // identical to a file already scanned
+  data.hashes[hash] = job.id;
+  if (isMapUrl(job.original)) {
+    const map = parseSourceMap(text);
+    if (map) {
+      processSourceMap(data, job.id, map, job.original, text.length);
+      data.files[job.id].label = label;
+    }
+    return;
+  }
+  const results = analyze(text, rulesFor(job.host));
+  data.files[job.id] = { url: job.id, kind: 'wayback', label, page: job.original, status: 'done', size: text.length, hash, ts: Date.now(), count: mergeFindings(data, results, { file: job.id }) };
+  markDirty(job.host);
+  scheduleBadge(job.host);
+  queueDependencyChecks(job.host, data);
+  // its source map, as archived around the same time
+  const ref = s.fetchSourceMaps && sourceMapRef(text);
+  if (ref && !ref.startsWith('data:')) {
+    try {
+      const mapUrl = new URL(ref, job.original).href;
+      const id = `https://web.archive.org/web/${ts}id_/${mapUrl}`;
+      if (!data.files[id]) enqueue({ kind: 'wayback', host: job.host, origin: job.origin, id, url: id, original: mapUrl, timestamp: ts });
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
 // ───────────────────────── dependency confusion (npm) ─────────────────────────
 
 const NPM_TTL = 3 * 24 * 3600 * 1000;
@@ -856,10 +999,116 @@ async function onResponseHeaders(d) {
     page: pageUrl,
     status: 'done',
     ts: Date.now(),
-    count: Object.values(data.findings).filter((f) => f.sources.some((x) => x.file === id)).length,
+    count: fileCount(data, id),
   };
   markDirty(scope.host);
   scheduleBadge(scope.host);
+}
+
+/** Number of findings with a source in the given pseudo-file (headers, observed requests, runtime). */
+const fileCount = (data, id) => Object.values(data.findings).filter((f) => f.sources.some((x) => x.file === id)).length;
+
+// ── requests the page makes (fetch / XHR / WebSocket): method, path, parameter and header names ──
+
+const OBSERVED_TYPES = new Set(['xmlhttprequest', 'websocket']);
+const observedSeen = new Set();
+const tabUrls = new Map(); // tabId → { url, t }
+
+async function tabUrlCached(tabId) {
+  const c = tabUrls.get(tabId);
+  if (c && Date.now() - c.t < 3000) return c.url;
+  const url = await tabUrl(tabId);
+  if (tabUrls.size > 200) tabUrls.clear();
+  tabUrls.set(tabId, { url, t: Date.now() });
+  return url;
+}
+
+async function onRequestSent(d) {
+  if (d.tabId < 0 || !OBSERVED_TYPES.has(d.type)) return;
+  const { settings } = await ready();
+  if (!settings.enabled || !settings.observeRequests) return;
+  const pageUrl = await tabUrlCached(d.tabId);
+  const scope = scopeFor(pageUrl, settings);
+  if (!scope || !scriptAllowed(d.url.replace(/^ws/i, 'http'), scope, settings)) return; // ignored hosts / first-party only
+  const results = observedRequest({ method: d.method, url: d.url, type: d.type, pageOrigin: scope.origin, requestHeaders: d.requestHeaders });
+  if (!results.length) return;
+  const sig = [scope.host, ...results.map((r) => `${r.category}|${r.meta?.kind || ''}|${r.value}`).sort()].join('\n');
+  if (observedSeen.has(sig)) return;
+  if (observedSeen.size > 10000) observedSeen.clear();
+  observedSeen.add(sig);
+  const data = await getHost(scope.host, scope.origin);
+  const id = 'observed:' + scope.host;
+  let sub = d.url;
+  try {
+    const u = new URL(d.url);
+    sub = `${d.method || 'GET'} ${u.host}${normalizePath(u.pathname)}`;
+  } catch {
+    /* keep */
+  }
+  mergeFindings(data, results, { file: id, sub });
+  data.files[id] = { url: id, kind: 'observed', label: `${scope.host} — observed requests`, page: pageUrl, status: 'done', ts: Date.now(), count: fileCount(data, id) };
+  markDirty(scope.host);
+}
+
+chrome.webRequest.onBeforeSendHeaders?.addListener(
+  (d) => void onRequestSent(d).catch(() => {}),
+  { urls: ['http://*/*', 'https://*/*', 'ws://*/*', 'wss://*/*'], types: [...OBSERVED_TYPES] },
+  ['requestHeaders', 'extraHeaders'],
+);
+
+// ── runtime hooks: names the page's code read / wrote, body fields, message handlers ──
+
+const RUNTIME_LIMITS = { params: 500, storage: 300, cookies: 200, attrs: 300, bodies: 300, handlers: 50 };
+
+async function onRuntimeCollect(msg, sender) {
+  const { settings } = await ready();
+  if (!settings.enabled || !settings.runtimeHooks) return { ok: false };
+  const pageUrl = sender.tab?.url || msg.pageUrl;
+  const scope = scopeFor(pageUrl, settings);
+  if (!scope) return { ok: false };
+  const isFrame = !!msg.frame || (sender.frameId ?? 0) > 0;
+  if (isFrame && !scriptAllowed(msg.pageUrl, scope, settings)) return { ok: false };
+  const d = msg.data && typeof msg.data === 'object' ? msg.data : {};
+  const list = (k) => (Array.isArray(d[k]) ? d[k].slice(0, RUNTIME_LIMITS[k]) : []);
+  const base = { line: 0, col: 0, hits: 1, severity: 'info' };
+  const out = [];
+  const input = (rule, label, kind, name, tags = [], example) => {
+    const f = inputFinding(kind, String(name ?? ''), ['runtime', ...tags]);
+    if (!f) return;
+    if (example) f.meta.example = example;
+    out.push({ ...base, rule, label, category: 'params', ...f });
+  };
+  for (const n of list('params')) input('rt-param', 'Query parameter read (runtime)', 'query', n);
+  for (const s of list('storage')) if (s && typeof s === 'object') input('rt-storage', 'Web storage key (runtime)', 'storage', s.key, s.area === 'session' ? ['session'] : []);
+  for (const n of list('cookies')) input('rt-cookie', 'Cookie written (runtime)', 'cookie', n);
+  for (const n of list('attrs')) input('rt-data', 'data-* attribute read (runtime)', 'data', n);
+  for (const b of list('bodies')) {
+    if (!b || typeof b !== 'object' || !Array.isArray(b.keys) || typeof b.path !== 'string') continue;
+    const path = normalizePath(b.path);
+    for (const k of b.keys.slice(0, 100)) input('rt-body', 'Request body field (runtime)', 'body', k, [], `${b.method} ${path}`);
+    const api = apiEndpoint(String(b.method || 'POST'), path);
+    if (api) out.push({ ...base, rule: 'rt-request', label: 'API call (runtime)', category: 'api', value: api.value, tags: [...api.tags, 'runtime'], meta: { ...api.meta, body: b.keys.slice(0, 30).join(', ') } });
+  }
+  for (const src of list('handlers')) {
+    if (typeof src !== 'string') continue;
+    const a = analyzeMessageHandler(src);
+    const flat = src.replace(/\s+/g, ' ');
+    out.push({ ...base, rule: 'rt-postmessage', label: a.label, category: 'intel', severity: a.severity, value: a.value, tags: ['runtime'], meta: a.meta, desc: POSTMESSAGE_DESC, ctx: ['', flat.slice(0, 400), flat.length > 400 ? '…' : ''] });
+  }
+  if (!out.length) return { ok: true };
+  let u;
+  try {
+    u = new URL(msg.pageUrl || pageUrl);
+  } catch {
+    return { ok: false };
+  }
+  const data = await getHost(scope.host, scope.origin);
+  const id = 'runtime:' + u.origin;
+  mergeFindings(data, out, { file: id, sub: `${u.host}${u.pathname} — runtime` });
+  data.files[id] = { url: id, kind: 'runtime', label: `${u.host} — runtime hooks`, page: pageUrl, status: 'done', ts: Date.now(), count: fileCount(data, id) };
+  markDirty(scope.host);
+  scheduleBadge(scope.host);
+  return { ok: true, findings: out.length };
 }
 
 chrome.webRequest.onCompleted.addListener(
@@ -878,6 +1127,14 @@ async function onPageCollect(msg, sender) {
   const isFrame = !!msg.frame || (sender.frameId ?? 0) > 0;
   // iframes are treated like scripts: ignored hosts (ads, analytics, video) and "first-party only" apply
   if (isFrame && !scriptAllowed(msg.pageUrl, scope, settings)) return { ok: false, reason: 'frame skipped' };
+  if (!isFrame && settings.waybackAuto) {
+    const data = await getHost(scope.host, scope.origin);
+    const failed = data.wayback?.error && Date.now() - data.wayback.checked > 3600000;
+    if (!data.wayback || failed) {
+      data.wayback = { checked: Date.now(), pending: true }; // once per host (failed lookups: retried after an hour)
+      waybackLookup({ host: scope.host }).catch(() => {});
+    }
+  }
   const base = { host: scope.host, origin: scope.origin, pageUrl, docUrl: msg.pageUrl || pageUrl };
   for (const url of msg.scripts || []) {
     if (scriptAllowed(url, scope, settings)) enqueue({ ...base, kind: 'external', id: url, url, force: msg.force });
@@ -973,6 +1230,8 @@ function status({ host }) {
 
 const HANDLERS = {
   'page-collect': onPageCollect,
+  'runtime-collect': onRuntimeCollect,
+  wayback: waybackLookup,
   rescan,
   'scan-urls': scanUrls,
   'scan-text': scanPastedText,

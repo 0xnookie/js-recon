@@ -28,6 +28,10 @@ export const DEFAULT_SETTINGS = {
   fetchChunks: true, // fetch the lazy chunks the bundler runtime knows about (webpack, Next.js, Vite, ESM)
   chunkLimit: 400, // max chunk files fetched per host
   captureHeaders: true, // analyse response headers of the target's own servers (CORS, CSP, cookies, banners)
+  observeRequests: true, // record the fetch / XHR / WebSocket calls pages make (method, path, parameter and header names)
+  runtimeHooks: false, // opt-in: hook the page's own world to record parameter / storage / cookie names, body fields, message handlers
+  waybackAuto: false, // opt-in: look up historical JS on the Wayback Machine for every new host
+  waybackLimit: 100, // archived files fetched per lookup
   firstPartyOnly: false, // only scan scripts from the same site as the page
   maxFileSizeMB: 15,
   concurrency: 4,

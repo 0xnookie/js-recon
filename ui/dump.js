@@ -3,7 +3,7 @@
 import { ZipWriter, zipPath } from '../src/zip.js';
 import { parseSourceMap, mapEntries, cleanSourcePath, sourceMapRef, decodeDataUri } from '../src/sourcemap.js';
 
-const SCRIPT_KINDS = new Set(['script', 'crawled', 'chunk', 'manual']);
+const SCRIPT_KINDS = new Set(['script', 'crawled', 'chunk', 'manual', 'wayback']);
 const INLINE_MAP_SUFFIX = ' [inline source map]';
 const isHttp = (u) => /^https?:\/\//i.test(u);
 

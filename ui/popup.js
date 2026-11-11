@@ -2,6 +2,7 @@ import { SEV_RANK, CONFIDENCE_RANK, decodeJwt, siteOf, hostOf, formatBytes, trun
 import { DEV_HOST_RE, CLOUD_HOST_RE, interestingParam } from '../src/rules.js';
 import { getSettings, saveSettings } from '../src/settings.js';
 import { sourcesZip, dumpHosts, canRebuild } from './dump.js';
+import { ZipWriter } from '../src/zip.js';
 
 const params = new URLSearchParams(location.search);
 const FULL = params.get('view') === 'full';
@@ -136,6 +137,7 @@ const apiParts = (f) => {
 // Params tab groups: everything on the client side a tester can set
 const PARAM_KINDS = {
   query: 'Query parameters',
+  body: 'Request body fields',
   data: 'data-* attributes',
   form: 'Form fields',
   header: 'Request headers',
@@ -145,6 +147,7 @@ const PARAM_KINDS = {
 const PARAM_KIND_ORDER = Object.keys(PARAM_KINDS);
 const PARAM_DESC = {
   query: 'Read from the page URL or sent in requests. Try it on the page and on the API endpoints.',
+  body: 'Top-level JSON / form field the page sends (recorded by the runtime hooks). The example shows the endpoint. Good candidates for mass assignment: add fields the UI never sends.',
   data: 'Read from a data-* attribute, usually on the embedding element (widget container or <script> tag). An embedder controls it.',
   form: 'Submitted by a form. Hidden fields are worth tampering with.',
   header: 'Request header set or read by the code. Custom headers often switch behaviour on the server.',
@@ -495,7 +498,7 @@ function paramRow(p) {
   return expandable(row, p.key, () => detailFor(p));
 }
 
-const KIND_LABEL = { script: 'script', crawled: 'crawled', chunk: 'chunk', manual: 'manual', inline: 'inline', html: 'DOM', sourcemap: 'map', headers: 'headers' };
+const KIND_LABEL = { script: 'script', crawled: 'crawled', chunk: 'chunk', manual: 'manual', inline: 'inline', html: 'DOM', sourcemap: 'map', headers: 'headers', observed: 'traffic', runtime: 'runtime', wayback: 'wayback' };
 
 async function downloadSources(f) {
   toast('Rebuilding sources…');
@@ -867,9 +870,108 @@ function textReport() {
   return out.join('\n');
 }
 
+/** Endpoint + API paths of the current host (relative or absolute, noise and static files excluded). */
+function endpointPaths() {
+  return [
+    ...ui.model.endpoints.filter((f) => !f.tags.some((t) => t === 'noise' || t === 'static')).map((f) => f.value),
+    ...ui.model.api.map((f) => apiParts(f).path),
+  ];
+}
+
+const absoluteUrls = () => [...new Set(endpointPaths().map(resolveUrl).filter((u) => isHttp(u) && !u.includes('${')))].sort();
+
+const WORDLIST_FILES = [
+  ['params.txt', 'query + body + form names (Arjun, x8, ffuf, Param Miner)'],
+  ['query-params.txt', 'parameters read from / sent in the URL'],
+  ['body-fields.txt', 'JSON / form fields the page sends (runtime hooks)'],
+  ['form-fields.txt', 'names of form inputs'],
+  ['data-attributes.txt', 'data-* attributes the code reads'],
+  ['headers.txt', 'custom request headers'],
+  ['cookies.txt', 'cookie names'],
+  ['storage-keys.txt', 'localStorage / sessionStorage keys'],
+  ['paths.txt', 'endpoint and API paths'],
+  ['path-segments.txt', 'single path segments for directory brute force'],
+  ['urls.txt', 'absolute URLs (httpx, nuclei, katana)'],
+  ['subdomains.txt', 'same-site hostnames (dnsx, httpx)'],
+];
+
+/** One ZIP of plain wordlists for ffuf, Arjun, x8, Param Miner … built from everything found for this host. */
+async function exportWordlists() {
+  const m = ui.model;
+  const uniq = (a) => [...new Set(a.filter(Boolean))].sort((x, y) => x.localeCompare(y));
+  const byKind = (k) => m.params.filter((p) => p.kind === k).map((p) => p.value);
+  const paths = uniq(
+    endpointPaths()
+      .map((v) => {
+        try {
+          return /^(?:[a-z][a-z0-9+.-]*:)?\/\//i.test(v) ? new URL(v, 'https://x.invalid').pathname : v;
+        } catch {
+          return v;
+        }
+      })
+      .map((v) => v.split(/[?#]/)[0])
+      .filter((p) => p.startsWith('/') && p.length > 1 && !p.includes('${')),
+  );
+  const lists = {
+    'params.txt': uniq([...byKind('query'), ...byKind('body'), ...byKind('form')]),
+    'query-params.txt': uniq(byKind('query')),
+    'body-fields.txt': uniq(byKind('body')),
+    'form-fields.txt': uniq(byKind('form')),
+    'data-attributes.txt': uniq(byKind('data')),
+    'headers.txt': uniq(byKind('header')),
+    'cookies.txt': uniq(byKind('cookie')),
+    'storage-keys.txt': uniq(byKind('storage')),
+    'paths.txt': paths,
+    'path-segments.txt': uniq(paths.flatMap((p) => p.split('/')).filter((s) => /^[\w.~-]{1,80}$/.test(s))),
+    'urls.txt': absoluteUrls(),
+    'subdomains.txt': uniq(m.domains.filter((d) => d.tags.includes('same-site') && !d.value.includes('*')).map((d) => d.value.replace(/:\d+$/, ''))),
+  };
+  const zip = new ZipWriter();
+  const written = [];
+  for (const [name, desc] of WORDLIST_FILES) {
+    const lines = lists[name];
+    if (!lines.length) continue;
+    await zip.add(name, lines.join('\n') + '\n');
+    written.push(`${name.padEnd(22)}${String(lines.length).padStart(6)}  ${desc}`);
+  }
+  if (!written.length) return toast('Nothing to export');
+  const h = ui.host;
+  const readme = [
+    `JS Recon wordlists for ${h} (${new Date().toISOString().slice(0, 16).replace('T', ' ')})`,
+    '',
+    ...written,
+    '',
+    'Examples',
+    `  arjun -u https://${h}/ENDPOINT -w params.txt`,
+    `  x8 -u "https://${h}/ENDPOINT" -w params.txt`,
+    `  ffuf -u "https://${h}/ENDPOINT?FUZZ=1" -w params.txt -mc all -ac`,
+    `  ffuf -u "https://${h}/FUZZ" -w paths.txt -mc all -ac`,
+    `  ffuf -u "https://${h}/api/FUZZ" -w path-segments.txt -mc all -ac`,
+    `  ffuf -u "https://${h}/ENDPOINT" -H "FUZZ: 1" -w headers.txt -mc all -ac`,
+    '  httpx -l urls.txt -sc -title        dnsx -l subdomains.txt -resp',
+    '  Burp Param Miner: Settings → "use custom wordlist" → params.txt (or headers.txt for header guessing)',
+    '',
+  ].join('\n');
+  await zip.add('README.txt', readme);
+  downloadBlob(`jsrecon-${safeName(h)}-wordlists-${stamp()}.zip`, zip.blob());
+  toast(`${written.length} wordlists`);
+}
+
+/** Historical JS and source maps of this host from the Wayback Machine (sends the host name to web.archive.org). */
+async function runWayback() {
+  $('#exportMenu').open = false;
+  if (!ui.host) return toast('Open a site first');
+  toast('Asking the Wayback Machine…');
+  const r = await chrome.runtime.sendMessage({ type: 'wayback', host: ui.host });
+  if (!r?.ok) return toast(r?.error || 'Wayback lookup failed');
+  toast(r.captures ? `${r.captures} archived JS / map files · scanning ${r.queued}` : 'No archived JS files for this host');
+  pollStatus();
+}
+
 async function doExport(kind) {
   $('#exportMenu').open = false;
   if (kind === 'dump') return openDump();
+  if (kind === 'wayback') return runWayback();
   if (kind === 'all') {
     const all = await chrome.storage.local.get(null);
     const hosts = Object.keys(all).filter((k) => k.startsWith('host:')).map((k) => exportJson(all[k]));
@@ -879,14 +981,8 @@ async function doExport(kind) {
   const base = `jsrecon-${safeName(ui.host)}`;
   if (kind === 'json') download(`${base}-${stamp()}.json`, JSON.stringify(exportJson(ui.data), null, 2), 'application/json');
   if (kind === 'txt') download(`${base}-${stamp()}.txt`, textReport());
-  if (kind === 'urls') {
-    const paths = [
-      ...ui.model.endpoints.filter((f) => !f.tags.some((t) => t === 'noise' || t === 'static')).map((f) => f.value),
-      ...ui.model.api.map((f) => apiParts(f).path),
-    ];
-    const urls = [...new Set(paths.map(resolveUrl).filter((u) => isHttp(u) && !u.includes('${')))].sort();
-    download(`${base}-urls-${stamp()}.txt`, urls.join('\n'));
-  }
+  if (kind === 'urls') download(`${base}-urls-${stamp()}.txt`, absoluteUrls().join('\n'));
+  if (kind === 'wordlists') await exportWordlists();
   if (kind === 'api') download(`${base}-api-${stamp()}.txt`, ui.model.api.map((f) => `${apiParts(f).method} ${resolveUrl(apiParts(f).path)}`).join('\n'));
 }
 
@@ -975,6 +1071,7 @@ function bind() {
     if (!m.hidden) $('#manualInput').focus();
   });
   $('#btnDump').addEventListener('click', () => ($('#dump').hidden ? openDump() : ($('#dump').hidden = true)));
+  $('#btnWayback').addEventListener('click', runWayback);
   $('#dumpAll').addEventListener('click', () => {
     Object.keys(ui.index).forEach((x) => dumpSelection.add(x));
     renderDumpHosts();

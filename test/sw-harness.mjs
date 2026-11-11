@@ -51,14 +51,15 @@ const FILES = {
 const fetched = [];
 globalThis.fetch = async (url) => {
   fetched.push(url);
-  const f = FILES[url];
+  const f = FILES[url] || Object.values(FILES).find((x) => x.match?.test(url));
   if (!f) return new Response('not found', { status: 404 });
   return new Response(f.body, { status: f.status || 200, headers: { 'content-type': f.type || 'application/javascript' } });
 };
 
 // ── chrome mock ──
 const mem = {};
-const listeners = { storage: [], webRequest: [], message: [], tabsUpdated: [] };
+const listeners = { storage: [], webRequest: [], sendHeaders: [], message: [], tabsUpdated: [] };
+const registered = new Map(); // dynamically registered content scripts
 const clone = (v) => (v === undefined ? undefined : structuredClone(v));
 const badges = {};
 globalThis.chrome = {
@@ -89,7 +90,10 @@ globalThis.chrome = {
     },
     onChanged: { addListener: (l) => listeners.storage.push(l) },
   },
-  webRequest: { onCompleted: { addListener: (l) => listeners.webRequest.push(l) } },
+  webRequest: {
+    onCompleted: { addListener: (l) => listeners.webRequest.push(l) },
+    onBeforeSendHeaders: { addListener: (l) => listeners.sendHeaders.push(l) },
+  },
   tabs: {
     get: async (id) => ({ id, url: PAGE }),
     query: async () => [{ id: 7, url: PAGE }],
@@ -98,7 +102,12 @@ globalThis.chrome = {
     },
     onUpdated: { addListener: (l) => listeners.tabsUpdated.push(l) },
   },
-  scripting: { executeScript: async () => [] },
+  scripting: {
+    executeScript: async () => [],
+    getRegisteredContentScripts: async ({ ids } = {}) => [...registered.values()].filter((s) => !ids || ids.includes(s.id)),
+    registerContentScripts: async (list) => list.forEach((s) => registered.set(s.id, s)),
+    unregisterContentScripts: async ({ ids }) => ids.forEach((id) => registered.delete(id)),
+  },
   action: {
     setBadgeText: async ({ tabId, text }) => (badges[tabId] = text),
     setBadgeBackgroundColor: async () => {},
@@ -255,6 +264,97 @@ check(d5.findings['params|cookie:sessionid']?.tags.includes('no-httponly'), 'Set
 check(d5.findings['intel|Server: nginx/1.18.0']?.severity === 'low', 'version banner');
 check(d5.files['headers:https://app.acme.test']?.kind === 'headers', 'headers listed as a source in Files');
 check(!JSON.stringify(d5.findings).includes('X-Should-Not-Appear') && !JSON.stringify(d5.findings).includes('thirdparty-gw'), "third-party API's headers ignored");
+
+console.log('\nObserved requests');
+const sendHeaders = (d) => listeners.sendHeaders.forEach((l) => l({ tabId: 7, ...d }));
+sendHeaders({
+  method: 'PATCH',
+  url: 'https://app.acme.test/api/v1/users/42?fields=role',
+  type: 'xmlhttprequest',
+  requestHeaders: [{ name: 'X-Tenant-Id', value: 'acme' }, { name: 'Authorization', value: 'Bearer abc.def.ghi' }],
+});
+sendHeaders({ method: 'GET', url: 'https://www.google-analytics.com/collect?v=1', type: 'xmlhttprequest' });
+await drain();
+const d6 = mem['host:app.acme.test'];
+check(d6.findings['api|PATCH /api/v1/users/{id}?fields=']?.tags.includes('observed'), 'observed API call with method and normalised path');
+check(d6.findings['params|header:X-Tenant-Id']?.tags.includes('observed'), 'observed custom request header');
+check(!JSON.stringify(d6.findings).includes('abc.def.ghi'), 'Authorization value not stored');
+check(!JSON.stringify(d6.findings).includes('google-analytics'), 'ignored hosts (analytics) skipped');
+check(d6.files['observed:app.acme.test']?.kind === 'observed', 'observed requests listed in Files');
+
+console.log('\nRuntime hooks');
+check(!registered.size, 'not registered by default');
+await chrome.storage.local.set({ settings: { ...mem.settings, runtimeHooks: true, scopeMode: 'allowlist', allowHosts: ['acme.test'], denyHosts: ['admin.acme.test'] } });
+await sleep(50);
+const rs = registered.get('jsrecon-runtime');
+check(rs?.world === 'MAIN' && rs.runAt === 'document_start' && rs.allFrames && rs.js[0] === 'src/runtime.js', 'registered in the page world at document_start, all frames');
+check(JSON.stringify(rs?.matches) === JSON.stringify(['*://acme.test/*', '*://*.acme.test/*']) && rs.excludeMatches.includes('*://admin.acme.test/*'), 'limited to the allow-list, deny-list excluded');
+const handlerSrc = 'function(e){ if (e.data.cmd === "login") document.body.innerHTML = e.data.html }';
+const rr = await send({
+  type: 'runtime-collect',
+  pageUrl: PAGE,
+  data: {
+    params: ['ut_force_test', 'next'],
+    storage: [{ key: 'featureFlags', area: 'local' }, { key: 'returnTo', area: 'session' }],
+    cookies: ['session_hint'],
+    attrs: ['data-tenant'],
+    bodies: [{ method: 'POST', path: '/api/v1/users/42/role', keys: ['role', 'isAdmin'] }],
+    handlers: [handlerSrc],
+  },
+});
+await drain();
+const d7 = mem['host:app.acme.test'];
+check(rr?.ok && d7.findings['params|ut_force_test']?.tags.includes('runtime'), 'query parameter read at runtime');
+check(d7.findings['params|storage:returnTo']?.tags.includes('session'), 'sessionStorage key at runtime');
+check(d7.findings['params|cookie:session_hint'] && d7.findings['params|data:data-tenant'], 'cookie written and data-* attribute read at runtime');
+check(d7.findings['params|body:isAdmin']?.meta.example === 'POST /api/v1/users/{id}/role', 'request body field with its endpoint');
+check(d7.findings['api|POST /api/v1/users/{id}/role']?.meta.body === 'role, isAdmin', 'API call from a request body');
+const rpm = Object.values(d7.findings).find((f) => f.rule === 'rt-postmessage');
+check(rpm?.severity === 'medium' && /login/.test(rpm.value), `message handler captured at runtime: ${rpm?.value}`);
+check(d7.files['runtime:https://app.acme.test']?.kind === 'runtime', 'runtime data listed in Files');
+await chrome.storage.local.set({ settings: { ...mem.settings, runtimeHooks: false, scopeMode: 'all', allowHosts: [], denyHosts: [] } });
+await sleep(50);
+check(!registered.size, 'unregistered when switched off');
+const rOff = await send({ type: 'runtime-collect', pageUrl: PAGE, data: { params: ['should_not_appear'] } });
+check(!rOff?.ok, 'runtime data ignored while the option is off');
+
+console.log('\nWayback Machine');
+FILES.cdx = {
+  match: /^https:\/\/web\.archive\.org\/cdx\/search\/cdx\?/,
+  type: 'application/json',
+  body: JSON.stringify([
+    ['timestamp', 'original'],
+    ['20230105120000', 'https://app.acme.test/static/js/admin-old.js'],
+    ['20210101000000', 'https://app.acme.test/static/main.abc.js'],
+    ['20240303000000', 'https://app.acme.test/chart/3333/iframe.js?revision=3'],
+    ['20240302000000', 'https://app.acme.test/chart/2222/iframe.js?revision=2'],
+    ['20200101000000', 'https://app.acme.test/static/js/legacy-2020.js'],
+  ]),
+};
+FILES['https://web.archive.org/web/20240303000000id_/https://app.acme.test/chart/3333/iframe.js?revision=3'] = { body: 'var chart = "/api/charts/3333";' };
+FILES['https://web.archive.org/web/20200101000000id_/https://app.acme.test/static/js/legacy-2020.js'] = { body: 'var legacy = "/api/v0/export.php";' };
+FILES['https://web.archive.org/web/20230105120000id_/https://app.acme.test/static/js/admin-old.js'] = { body: 'axios.delete("/api/internal/tenants/all");\n//# sourceMappingURL=admin-old.js.map' };
+FILES['https://web.archive.org/web/20230105120000id_/https://app.acme.test/static/js/admin-old.js.map'] = {
+  type: 'application/json',
+  body: JSON.stringify({ version: 3, sources: ['src/admin/tenants.ts'], sourcesContent: ['export const purge = () => fetch("/api/internal/purge", { method: "POST" });'] }),
+};
+const wb = await send({ type: 'wayback', host: 'app.acme.test', limit: 3 });
+await drain();
+const d8 = mem['host:app.acme.test'];
+check(wb?.ok && wb.captures === 5 && wb.queued === 3, `CDX lookup: ${wb?.captures} captures, ${wb?.queued} queued`);
+check(!fetched.some((u) => u.includes('main.abc.js') && u.includes('web.archive.org')), 'live, already scanned file not fetched again from the archive');
+check(fetched.some((u) => u.includes('legacy-2020.js')) && !fetched.some((u) => u.includes('chart/2222')), 'one file per distinct script before older versions (chart/<id>/iframe.js once)');
+const arch = d8.files['https://web.archive.org/web/20230105120000id_/https://app.acme.test/static/js/admin-old.js'];
+check(arch?.kind === 'wayback' && arch.label === 'https://app.acme.test/static/js/admin-old.js (archived 2023-01-05)', `archived bundle scanned (${arch?.label})`);
+check(d8.findings['api|DELETE /api/internal/tenants/all'], 'endpoint from the archived bundle');
+const archMap = d8.files['https://web.archive.org/web/20230105120000id_/https://app.acme.test/static/js/admin-old.js.map'];
+check(archMap?.kind === 'sourcemap' && /archived/.test(archMap.label) && d8.findings['api|POST /api/internal/purge'], 'its archived source map followed and scanned');
+
+const cdxBackup = FILES.cdx;
+FILES.cdx = { ...cdxBackup, status: 503, body: '<html>Internet Archive: Temporarily Offline</html>', type: 'text/html' };
+const wbDown = await send({ type: 'wayback', host: 'app.acme.test' });
+check(!wbDown.ok && /503.*try again later/.test(wbDown.error) && mem['host:app.acme.test'] && (await send({ type: 'status' })), `archive.org outage reported (${wbDown.error})`);
+FILES.cdx = cdxBackup;
 
 console.log('\nScope');
 await chrome.storage.local.set({ settings: { ...mem.settings, denyHosts: ['acme.test'] } });

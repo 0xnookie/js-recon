@@ -22,6 +22,26 @@
   const JS_RE = /\.m?js(?:[?#]|$)/i;
   const sent = new WeakSet();
 
+  // Runtime hooks (opt-in; src/runtime.js runs in the page's own world) post batches of names here.
+  // The page could fire this event itself, so the service worker treats the data as page-supplied.
+  document.addEventListener('jsrecon:runtime', (e) => {
+    const d = e.detail;
+    if (typeof d !== 'string' || d.length > 2000000) return;
+    let data;
+    try {
+      data = JSON.parse(d);
+    } catch {
+      return;
+    }
+    if (!data || typeof data !== 'object') return;
+    try {
+      chrome.runtime.sendMessage({ type: 'runtime-collect', pageUrl: location.href, frame: IS_FRAME, data }).catch(() => {});
+    } catch {
+      /* extension reloaded */
+    }
+  });
+  document.dispatchEvent(new CustomEvent('jsrecon:ready'));
+
   function hostMatches(host, patterns) {
     host = host.toLowerCase();
     return (patterns || []).some((p) => {

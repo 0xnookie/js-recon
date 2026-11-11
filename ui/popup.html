@@ -25,6 +25,10 @@
           <svg class="i" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="5" rx="1.5" /><path d="M5 9v9.5A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5V9" /><path d="M10 13h4" /></svg>
           Dump
         </button>
+        <button id="btnWayback" class="btn ghost full-only" title="Fetch historical JS and source maps of this host from the Wayback Machine. Sends the host name to web.archive.org.">
+          <svg class="i" viewBox="0 0 24 24"><path d="M3.5 12a8.5 8.5 0 1 0 2.6-6.1" /><path d="M3.5 4.5v4h4" /><path d="M12 8v4.2l2.8 1.8" /></svg>
+          Wayback
+        </button>
         <button id="btnRescan" class="btn primary" title="Re-fetch and re-scan every file for this host">
           <svg class="i" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.34-5.66L20 8.5" /><path d="M20 4v4.5h-4.5" /></svg>
           Rescan
@@ -40,9 +44,11 @@
             <button data-export="txt">Text report <span class="hint">.txt</span></button>
             <button data-export="urls">Endpoints + API as URLs <span class="hint">ffuf / httpx</span></button>
             <button data-export="api">API endpoints <span class="hint">METHOD URL</span></button>
+            <button data-export="wordlists">Wordlists <span class="hint">ffuf / Arjun · .zip</span></button>
             <button data-export="all">JSON report <span class="hint">all hosts</span></button>
             <hr />
             <button data-export="dump">Dump static files… <span class="hint">.zip</span></button>
+            <button data-export="wayback" title="Fetch historical JS and source maps of this host from the Wayback Machine. Sends the host name to web.archive.org.">Historical JS (Wayback) <span class="hint">archive.org</span></button>
           </div>
         </details>
         <span class="divider"></span>
