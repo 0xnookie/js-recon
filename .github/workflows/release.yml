@@ -1,0 +1,51 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Run tests
+        run: |
+          node test/run-tests.mjs
+          node test/sw-harness.mjs
+
+      - name: Check tag matches manifest version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          MANIFEST="$(node -p "require('./manifest.json').version")"
+          echo "tag=$TAG manifest=$MANIFEST"
+          if [ "$TAG" != "$MANIFEST" ]; then
+            echo "::error::tag v$TAG does not match manifest version $MANIFEST"
+            exit 1
+          fi
+
+      - name: Package extension
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          ZIP="js-recon-${VERSION}.zip"
+          # Ship only what the extension loads at runtime (no tests, assets, docs or git metadata).
+          zip -r -9 "$ZIP" manifest.json icons fonts src ui \
+            -x '*/.DS_Store' '*/Thumbs.db'
+          echo "ZIP=$ZIP" >> "$GITHUB_ENV"
+          unzip -l "$ZIP"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "$ZIP" \
+            --title "JS Recon $GITHUB_REF_NAME" \
+            --generate-notes

@@ -8,6 +8,18 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 
+// Extract a .zip for the ZIP-writer round-trip test. bsdtar (Windows, macOS, local PowerShell)
+// reads zip directly; GNU tar on Linux does not, so fall back to unzip (present on CI runners).
+function extractZip(zipFile, outDir) {
+  try {
+    execFileSync('tar', ['-xf', zipFile, '-C', outDir], { stdio: 'pipe' });
+    if (readFileSync(join(outDir, 'acme.io/static/js/main.js'), 'utf8')) return;
+  } catch {
+    /* fall through to unzip */
+  }
+  execFileSync('unzip', ['-qq', '-o', zipFile, '-d', outDir], { stdio: 'pipe' });
+}
+
 const rules = buildRules({});
 const rep = (c, n) => c.repeat(n);
 let seed = 0x9e3779b9;
@@ -618,7 +630,7 @@ const zbuf = Buffer.from(await zip.blob().arrayBuffer());
 const tmp = mkdtempSync(join(tmpdir(), 'jsrecon-zip-'));
 writeFileSync(join(tmp, 't.zip'), zbuf);
 mkdirSync(join(tmp, 'out'));
-execFileSync('tar', ['-xf', join(tmp, 't.zip'), '-C', join(tmp, 'out')]);
+extractZip(join(tmp, 't.zip'), join(tmp, 'out'));
 check(readFileSync(join(tmp, 'out/acme.io/static/js/main.js'), 'utf8') === zipText, `deflated entry round-trips (${zipText.length} → ${zbuf.length} bytes zip)`);
 check(readFileSync(join(tmp, 'out/acme.io/static/js/main~2.js'), 'utf8') === 'dup name', 'duplicate names made unique');
 check(readFileSync(join(tmp, 'out/acme.io/_/evil/_x__y.js'), 'utf8') === 'sanitised', 'path traversal and invalid chars sanitised');

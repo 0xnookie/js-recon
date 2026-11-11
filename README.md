@@ -8,20 +8,21 @@ JS Recon
 
 ### Passive JavaScript Recon for Bug Bounty & Pentests
 
-**A Chrome / Edge extension that mines every script, inline config, iframe, source map, lazy-loaded chunk, request and response header of the sites you browse, plus their archived JS on the Wayback Machine, for secrets, API endpoints with their HTTP method, GraphQL operations, hidden parameters, postMessage handlers, subdomains, cloud assets and dependency-confusion candidates, and tells you what changed when the app is redeployed. Everything runs locally in your browser.**
+**A Chrome / Edge extension that mines every script, inline config, iframe, source map, lazy-loaded chunk, request and response header of the sites you browse, plus their archived JS on the Wayback Machine, for secrets, API endpoints with their HTTP method, GraphQL operations, client-side routes, DOM-XSS taint flows, hidden parameters, postMessage handlers, subdomains, cloud assets and dependency-confusion candidates, and tells you what changed when the app is redeployed. Everything runs locally in your browser.**
 
 🎯 [What is it](#-what-is-js-recon) • ✨ [Features](#-features) • 🖥️ [Screenshots](#️-screenshots) • 🏗️ [How it works](#️-how-it-works) • 🚀 [Install](#-install) • 🕹️ [Usage](#️-usage) • ⚙️ [Settings](#️-settings--network-activity) • 🧪 [Tests](#-tests) • 🛡️ [Safety](#️-safety--authorization)
 
+[![CI](https://github.com/0xnookie/js-recon/actions/workflows/ci.yml/badge.svg)](https://github.com/0xnookie/js-recon/actions/workflows/ci.yml)
 [![Security](https://img.shields.io/badge/Security-Recon-red)]()
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Browser](https://img.shields.io/badge/Chrome%20%7C%20Edge-Manifest%20V3-black?logo=googlechrome&logoColor=white)]()
-[![Rules](https://img.shields.io/badge/Rules-142-brightgreen)]()
+[![Rules](https://img.shields.io/badge/Rules-154-brightgreen)]()
 [![Secret rules](https://img.shields.io/badge/Secret%20rules-68-red)]()
 [![Cloud](https://img.shields.io/badge/Cloud%20providers-14-informational)]()
 [![Bundlers](https://img.shields.io/badge/Lazy%20chunks-webpack%20%7C%20Next.js%20%7C%20Vite%20%7C%20ESM-8A2BE2)]()
 [![Dependencies](https://img.shields.io/badge/Runtime%20deps-0-brightgreen)]()
 [![Build](https://img.shields.io/badge/Build%20step-none-lightgrey)]()
-[![Version](https://img.shields.io/badge/Version-1.2.0-orange)]()
+[![Version](https://img.shields.io/badge/Version-1.3.0-orange)]()
 [![PRs](https://img.shields.io/badge/PRs-welcome-brightgreen)]()
 
 </div>
@@ -51,11 +52,13 @@ Modern web apps ship their attack surface to the browser: API routes, feature fl
 | **Secrets** | 68 secret rules: provider-specific keys (AWS, GCP, Azure, GitHub, GitLab, Slack, Stripe, OpenAI, Anthropic, Twilio, SendGrid …), private keys, JWTs (decoded), DB connection strings, credentials in URLs, hard-coded Bearer / Basic auth and a context-based `key = "value"` rule. Each secret gets a **Shannon-entropy confidence**: `certain` / `firm` / `tentative`. |
 | **API** | Endpoints **with their HTTP method**, coloured like Swagger UI: `axios.post()`, `http.get<T>()`, `fetch(url, { method })`, `new Request`, `xhr.open("PUT", …)`, `$.ajax({ type, url })`, `axios({ method, url })`, wrapper functions, `` `${base}/path` `` and `BASE + "/path"`. Plus the calls the page **really makes**, tagged *observed*, with IDs normalised (`/users/{id}`). **GraphQL operations** (`gql` templates, Apollo / Relay documents) appear as QUERY / MUTATION / SUBSCRIPTION rows with their variables, root fields and full document. Every row has *curl* and *Copy*. |
 | **Endpoints / URLs** | LinkFinder-style extraction with template literals, scheme-less `host.tld/path` strings and Next.js routes. Tagged *interesting* (admin, debug, upload, token, graphql …), *static* or *noise*. |
+| **Routes** | The app's own **client-side pages** parsed out of the router config — React Router (`<Route path>`, `createBrowserRouter`), Vue Router and Angular (`loadChildren`, `canActivate`), plus any plain `{ path, component/element }` table. Includes pages that are never linked in the UI (`/admin`, `/internal`, debug consoles). Routes behind an auth / role guard are tagged *guarded*; lazy-loaded modules and redirect targets are captured too. Exported to `routes.txt`. |
 | **Domains** | Subdomains of the target found anywhere in the code, plus every host from the **Content-Security-Policy** and trusted **CORS** origins. Tagged *same site*, *third party*, *cloud*, *interesting* (dev, staging, internal, jenkins …). |
 | **Cloud** | AWS (S3, API Gateway, Lambda URLs, AppSync, RDS, ELB, CloudFront, Cognito, ARNs), Azure, Google Cloud / Firebase, DigitalOcean, Oracle, Alibaba, Rackspace, DreamHost, Cloudflare R2, Wasabi, Backblaze, Linode, IBM COS, Supabase and PaaS hosts. |
 | **Params** | Every client-side input, grouped: **query parameters** (also through minified `URLSearchParams` variables, router `query.x`, `getParameterByName()`, `/[?&]token=/` regexes and names declared in config), **request body fields** (runtime), **`data-*` attributes**, **form fields** (hidden ones tagged), **request headers** (incl. `Access-Control-Allow-Headers` and observed custom headers), **cookies** (incl. `Set-Cookie`, session cookies without `HttpOnly` flagged) and **localStorage / sessionStorage keys**. Names confirmed in real traffic or at runtime are tagged *observed* / *runtime*. |
 | **Deps** | **Dependency confusion**: package names from source maps, `node_modules/…` paths, imports and embedded `package.json` are checked against `registry.npmjs.org`. Missing packages and unclaimed scopes are **critical**. |
 | **Intel** | Injected config objects (`window.APP_CONFIG = {…}` with their keys), switched-off **feature flags**, weak CSP (`'unsafe-inline'`, `'unsafe-eval'`, JSONP / user-content hosts), CORS `null` origin and write methods, server / framework **version banners**, platform fingerprints (Cloudflare, CloudFront, Vercel …), unusual custom response headers, lazy-chunk lists, exposed source maps, **bundle changes** (redeploys, with what's new), emails, internal IPs, developer comments. **postMessage handlers** with their origin check (none / weak substring / regex / strict), the message types they accept and the sinks the data reaches (HTML, code, navigation, storage, requests, replies to `"*"`). |
+| **Sinks** | **DOM-XSS taint flows**, on by default: a URL / attacker-influenced source (`location.hash` / `search` / `href`, `document.URL` / `referrer`, `window.name`, `URLSearchParams`, a query-param getter) reaching a dangerous sink in the same expression — `innerHTML` / `outerHTML`, `insertAdjacentHTML`, `document.write`, `dangerouslySetInnerHTML`, jQuery `.html()`, `eval` / `Function` / string timers (HTML & code sinks, *high*), and `location` / `window.open` navigation, `setAttribute("src"/"srcdoc"/…)` and `srcdoc` (*medium*). Precise enough to run without the noise of raw single-pattern sink rules. |
 | **Files** | Every scanned source (scripts, lazy chunks, inline scripts, iframes, DOM, source maps, response headers, observed traffic, runtime hooks, archived files from the Wayback Machine), with size, hits, errors and a **Sources .zip** button that rebuilds the original source tree from a map. |
 
 **Also:**
@@ -66,7 +69,8 @@ Modern web apps ship their attack surface to the browser: API routes, feature fl
 - **Wordlists** per input kind (params, body fields, headers, cookies, storage keys, paths, path segments, URLs, subdomains), ready for ffuf, Arjun, x8 and Param Miner.
 - **Historical JS from the Wayback Machine**: one archived file per distinct script first, sensitive names and source maps first, libraries last.
 - A **static-file dumper** that zips every JS file, `.map` file and reconstructed source tree of one or more hosts for grep, semgrep or trufflehog.
-- DOM-XSS sink rules (off by default), custom regex rules and a manual scanner for URLs or pasted code.
+- **Continuous integration**: both test suites, a syntax check of every source and manifest validation run on each push (GitHub Actions); tagged releases are packaged and published automatically.
+- Broader single-pattern DOM-XSS sink rules (off by default), custom regex rules and a manual scanner for URLs or pasted code.
 
 ---
 
@@ -237,8 +241,8 @@ Everything below runs locally. This is all the traffic the extension itself crea
 ## 🧪 Tests
 
 ```bash
-node test/run-tests.mjs        # rules, inputs, headers, lazy chunks, postMessage, observed requests, GraphQL + schema,
-                               # OpenAPI / Postman, Wayback order, ZIP, 6 MB perf check
+node test/run-tests.mjs        # rules, inputs, headers, lazy chunks, postMessage, routes, DOM-XSS taint flows,
+                               # observed requests, GraphQL + schema, OpenAPI / Postman, Wayback order, ZIP, 6 MB perf check
 node test/sw-harness.mjs       # service worker end to end with mocked chrome.*, fetch, npm and archive.org: iframes, chunks,
                                # headers, observed traffic, runtime hooks, Wayback, change alerts, send to proxy, dumper
 node test/fp-sweep.mjs <dir>   # scan a directory of real JS and list secret hits (false-positive check)
@@ -254,6 +258,8 @@ src/background.js   service worker: capture, fetch queue, source maps, lazy chun
 src/analyzer.js     pure scanning engine (no chrome.*, testable in Node)
 src/rules.js        rules, link / API / input classification, postMessage analysis, dependency extraction, custom rules
 src/chunks.js       lazy-chunk discovery (webpack chunk-map evaluator, Next.js, Vite, ESM)
+src/routes.js       client-side route-map extraction (React Router, Vue Router, Angular)
+src/taint.js        DOM-XSS taint flows (source → sink in one expression)
 src/headers.js      response-header analysis (CORS, CSP, cookies, banners, custom headers)
 src/requests.js     observed requests (path normalisation, parameter / header names), script families, Wayback order
 src/graphql.js      GraphQL document extraction, parser and schema sketch
@@ -266,6 +272,7 @@ ui/                 popup / dashboard / settings, dump.js (source reconstruction
 icons/  fonts/      toolbar icons and logo; Inter and JetBrains Mono (SIL OFL)
 assets/             README banner and screenshots
 test/               Node tests
+.github/workflows/  CI (tests + checks) and tagged-release packaging
 ```
 
 ---
