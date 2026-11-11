@@ -887,6 +887,82 @@ body.full .host-select {
   text-overflow: ellipsis;
 }
 
+/* content search */
+#searchQuery {
+  flex: 1;
+  min-width: 0;
+}
+
+.search-results {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 460px;
+  overflow: auto;
+}
+
+.search-group {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.search-file {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 7px 10px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.search-file .src {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.search-hit {
+  display: flex;
+  gap: 10px;
+  padding: 3px 10px;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.search-hit + .search-hit {
+  border-top: 1px solid var(--border);
+}
+
+.search-loc {
+  flex: none;
+  min-width: 54px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.search-hit code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.search-hit mark {
+  padding: 1px 2px;
+  border-radius: 3px;
+  color: var(--text);
+  background: rgba(245, 165, 36, 0.32);
+}
+
+.pad {
+  padding: 4px 2px;
+}
+
 /* ── tabs & toolbar ── */
 
 .tabs-bar {

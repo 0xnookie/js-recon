@@ -3,6 +3,7 @@
 import { analyze } from '../src/analyzer.js';
 import { buildRules, RULES, parseCustomRules, classifyLink, makeSubdomainRule } from '../src/rules.js';
 import { ZipWriter, zipPath } from '../src/zip.js';
+import { buildMatcher, findMatches } from '../ui/search.js';
 import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -754,6 +755,37 @@ check(readFileSync(join(tmp, 'out/acme.io/static/js/main~2.js'), 'utf8') === 'du
 check(readFileSync(join(tmp, 'out/acme.io/_/evil/_x__y.js'), 'utf8') === 'sanitised', 'path traversal and invalid chars sanitised');
 check(readFileSync(join(tmp, 'out/acme.io/ünïcode.txt'), 'utf8') === 'utf8', 'UTF-8 file names');
 rmSync(tmp, { recursive: true, force: true });
+
+console.log('\nContent search (grep helpers)');
+{
+  const text = 'const x = createServerReference("ACTION_ID_abc123");\nvar y = ACTION_ID_def456;\n';
+  const lit = findMatches(text, buildMatcher('ACTION_ID_'));
+  check(lit.length === 2, `literal finds both ACTION_ID_ occurrences (${lit.length})`);
+  check(lit[0].line === 1 && lit[1].line === 2, 'line numbers tracked across newlines');
+  check(lit[0].hit === 'ACTION_ID_' && lit[0].post.startsWith('abc123'), 'snippet keeps hit + trailing context');
+
+  const dots = findMatches('a.b axb a.b', buildMatcher('a.b'));
+  check(dots.length === 2, `literal "a.b" matches the dots, not the wildcard (${dots.length})`);
+
+  check(findMatches('Foo FOO foo', buildMatcher('foo', { regex: true })).length === 3, 'regex is case-insensitive by default');
+  check(findMatches('Foo FOO foo', buildMatcher('foo', { regex: true, caseSensitive: true })).length === 1, 'case-sensitive matches exactly one');
+
+  const mini = rep('x', 200) + 'NEEDLE' + rep('y', 200);
+  const one = findMatches(mini, buildMatcher('NEEDLE'));
+  check(one.length === 1 && one[0].line === 1, 'minified single line reports line 1');
+  check(one[0].pre.startsWith('…') && one[0].post.endsWith('…') && one[0].pre.length < 70, 'long line clamped to a ±context window');
+
+  check(Array.isArray(findMatches('abcabc', buildMatcher('x*', { regex: true }), 10)), 'zero-width regex terminates');
+  check(findMatches('a a a a a a', buildMatcher('a'), 3).length === 3, 'per-file match limit is honoured');
+
+  let threw = false;
+  try {
+    buildMatcher('(', { regex: true });
+  } catch {
+    threw = true;
+  }
+  check(threw, 'invalid regex is rejected');
+}
 
 console.log('\nPerformance');
 let big = '';

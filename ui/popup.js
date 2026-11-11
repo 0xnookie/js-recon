@@ -2,6 +2,7 @@ import { SEV_RANK, CONFIDENCE_RANK, decodeJwt, siteOf, hostOf, formatBytes, trun
 import { DEV_HOST_RE, CLOUD_HOST_RE, interestingParam } from '../src/rules.js';
 import { getSettings, saveSettings } from '../src/settings.js';
 import { sourcesZip, dumpHosts, canRebuild } from './dump.js';
+import { searchHost } from './search.js';
 import { ZipWriter } from '../src/zip.js';
 import { buildOpenApi, buildPostman, buildSarif, replayCandidates } from '../src/exporters.js';
 import { parseDefinition, schemaSketch } from '../src/graphql.js';
@@ -946,6 +947,80 @@ function openDump() {
   renderDumpHosts();
   $('#dump').hidden = false;
   $('#manual').hidden = true;
+  $('#searchFiles').hidden = true;
+}
+
+// ───────────────────────── content search ─────────────────────────
+
+function openSearch() {
+  if (!FULL) {
+    chrome.tabs.create({ url: chrome.runtime.getURL(`ui/popup.html?view=full&find=1${ui.host ? '&host=' + encodeURIComponent(ui.host) : ''}`) });
+    window.close();
+    return;
+  }
+  $('#searchFiles').hidden = false;
+  $('#manual').hidden = true;
+  $('#dump').hidden = true;
+  $('#searchQuery').focus();
+}
+
+function renderSearchResults(res, label) {
+  const box = $('#searchResults');
+  box.replaceChildren();
+  if (!res.matches.length) {
+    box.append(h('div', { class: 'muted' }, `No matches for ${label}.`));
+    return;
+  }
+  const groups = new Map();
+  for (const m of res.matches) {
+    if (!groups.has(m.source)) groups.set(m.source, { url: m.url, kind: m.kind, items: [] });
+    groups.get(m.source).items.push(m);
+  }
+  for (const [source, g] of groups) {
+    const head = h(
+      'div',
+      { class: 'search-file' },
+      h('span', { class: 'mono src' }, source),
+      h('span', { class: 'muted small' }, `${g.items.length} match${g.items.length === 1 ? '' : 'es'}`),
+      g.kind === 'file' && isHttp(g.url) ? btn('open', 'Open this file in a tab', () => chrome.tabs.create({ url: g.url })) : null,
+    );
+    const hits = g.items.map((m) =>
+      h('div', { class: 'search-hit' }, h('span', { class: 'search-loc muted small' }, `${m.line}:${m.col}`), h('code', { class: 'mono' }, m.pre, h('mark', {}, m.hit), m.post)),
+    );
+    box.append(h('div', { class: 'search-group' }, head, ...hits));
+  }
+  if (res.truncated) box.append(h('div', { class: 'muted small pad' }, 'Results truncated — refine your query.'));
+}
+
+async function runSearch() {
+  const raw = $('#searchQuery').value.trim();
+  const msg = $('#searchMsg');
+  if (!raw) return void (msg.textContent = 'Enter a string or /regex/.');
+  if (!ui.host) return void (msg.textContent = 'Open a site first.');
+  // /pattern/ or /pattern/i in the box is a shortcut for the Regex checkbox (the trailing i sets case-insensitive)
+  let query = raw;
+  let regex = $('#searchRegex').checked;
+  let caseSensitive = $('#searchCase').checked;
+  const slash = /^\/(.+)\/([a-z]*)$/.exec(raw);
+  if (slash) {
+    query = slash[1];
+    regex = true;
+    if (/i/.test(slash[2])) caseSensitive = false;
+  }
+  const opts = { regex, caseSensitive, includeNodeModules: $('#searchNodeModules').checked };
+  const go = $('#btnSearchGo');
+  go.disabled = true;
+  $('#searchResults').replaceChildren();
+  msg.textContent = 'Searching…';
+  try {
+    const res = await searchHost(ui.host, query, opts, (done, total) => (msg.textContent = `Searching ${done} / ${total} files…`));
+    renderSearchResults(res, regex ? `/${query}/` : `“${query}”`);
+    msg.textContent = `${res.matches.length}${res.truncated ? '+' : ''} match${res.matches.length === 1 ? '' : 'es'} in ${res.files} file${res.files === 1 ? '' : 's'}${res.errors ? ` · ${res.errors} unreadable` : ''}`;
+  } catch (e) {
+    msg.textContent = 'Failed: ' + (e.message || e);
+  } finally {
+    go.disabled = false;
+  }
 }
 
 // ───────────────────────── exports ─────────────────────────
@@ -1273,6 +1348,7 @@ async function doExport(kind) {
   if (kind === 'probe') return runProbe(); // two-click confirm, menu stays open
   $('#exportMenu').open = false;
   if (kind === 'dump') return openDump();
+  if (kind === 'find') return openSearch();
   if (kind === 'wayback') return runWayback();
   if (kind === 'all') {
     const all = await chrome.storage.local.get(null);
@@ -1376,9 +1452,18 @@ function bind() {
     const m = $('#manual');
     m.hidden = !m.hidden;
     $('#dump').hidden = true;
+    $('#searchFiles').hidden = true;
     if (!m.hidden) $('#manualInput').focus();
   });
-  $('#btnDump').addEventListener('click', () => ($('#dump').hidden ? openDump() : ($('#dump').hidden = true)));
+  $('#btnDump').addEventListener('click', () => {
+    $('#searchFiles').hidden = true;
+    $('#dump').hidden ? openDump() : ($('#dump').hidden = true);
+  });
+  $('#btnSearchFiles').addEventListener('click', () => ($('#searchFiles').hidden ? openSearch() : ($('#searchFiles').hidden = true)));
+  $('#btnSearchGo').addEventListener('click', runSearch);
+  $('#searchQuery').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') runSearch();
+  });
   $('#btnWayback').addEventListener('click', runWayback);
   $('#dumpAll').addEventListener('click', () => {
     Object.keys(ui.index).forEach((x) => dumpSelection.add(x));
@@ -1450,6 +1535,7 @@ async function init() {
   renderHostSelect();
   await loadHost(ui.host);
   if (FULL && params.get('dump')) openDump();
+  if (FULL && params.get('find')) openSearch();
   pollStatus();
   setInterval(pollStatus, 1000);
   if (!FULL) $('#search').focus();

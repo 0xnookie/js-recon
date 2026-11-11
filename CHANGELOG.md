@@ -5,6 +5,17 @@ All notable changes to **JS Recon** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] — 2026-11-11
+
+### Added
+- **Content search** — grep the raw text of every scanned JS file and the sources rebuilt
+  from source maps for a host, for a literal string or `/regex/`. Finds what the detection
+  rules have no pattern for (Next.js `ACTION_ID_` server-action refs, feature flags,
+  internal hosts, build constants). Results group by file with line / column and a
+  highlighted, windowed snippet. Reached from the dashboard's **Search files** button or
+  the **Search file contents…** export-menu item. Bodies aren't stored, so it re-fetches
+  (normally from the HTTP cache); inline scripts and page DOM are not covered.
+
 ## [1.6.0] — 2026-11-11
 
 ### Changed
@@ -73,6 +84,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   response headers of the pages you visit, surfacing endpoints, API keys, secrets, source
   maps, cloud assets and other recon data, with per-host findings and report exports.
 
+[1.7.0]: https://github.com/0xnookie/js-recon/releases/tag/v1.7.0
 [1.6.0]: https://github.com/0xnookie/js-recon/releases/tag/v1.6.0
 [1.5.0]: https://github.com/0xnookie/js-recon/releases/tag/v1.5.0
 [1.4.0]: https://github.com/0xnookie/js-recon/releases/tag/v1.4.0

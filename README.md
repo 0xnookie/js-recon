@@ -22,7 +22,7 @@ JS Recon
 [![Bundlers](https://img.shields.io/badge/Lazy%20chunks-webpack%20%7C%20Next.js%20%7C%20Vite%20%7C%20ESM-8A2BE2)]()
 [![Dependencies](https://img.shields.io/badge/Runtime%20deps-0-brightgreen)]()
 [![Build](https://img.shields.io/badge/Build%20step-none-lightgrey)]()
-[![Version](https://img.shields.io/badge/Version-1.6.0-orange)]()
+[![Version](https://img.shields.io/badge/Version-1.7.0-orange)]()
 [![PRs](https://img.shields.io/badge/PRs-welcome-brightgreen)]()
 
 </div>
@@ -71,6 +71,7 @@ Modern web apps ship their attack surface to the browser: API routes, feature fl
 - **Wordlists** per input kind (params, body fields, headers, cookies, storage keys, paths, path segments, URLs, subdomains), ready for ffuf, Arjun, x8 and Param Miner.
 - **Historical JS from the Wayback Machine**: one archived file per distinct script first, sensitive names and source maps first, libraries last.
 - A **static-file dumper** that zips every JS file, `.map` file and reconstructed source tree of one or more hosts for grep, semgrep or trufflehog.
+- **Content search** that greps the raw text of every scanned JS file and reconstructed source of a host for a string or `/regex/` — the things no detection rule covers: Next.js `ACTION_ID_` server-action refs, feature flags, internal hosts, build constants.
 - **Continuous integration**: both test suites, a syntax check of every source and manifest validation run on each push (GitHub Actions); tagged releases are packaged and published automatically.
 - Broader single-pattern DOM-XSS sink rules (off by default), custom regex rules and a manual scanner for URLs or pasted code.
 
@@ -198,7 +199,7 @@ No build step and no runtime dependencies. Chrome / Edge 116+; the styled drop-d
 ## 🕹️ Usage
 
 - **Popup:** Secrets · API · Endpoints · URLs · Domains · Cloud · Params · Deps · Intel · Files. Filter with text or `/regex/`, narrow by severity, hide tentative secrets or noise, show only *interesting* items. Click a row for every source location with highlighted context, decoded JWT claims, entropy and npm status.
-- **Dashboard** (⤢ in the popup): the same in a full tab, plus a host switcher, the **Manual scan** panel (JS / `.map` URLs or pasted code), the **Dump** panel and **Wayback** (historical JS of the current host).
+- **Dashboard** (⤢ in the popup): the same in a full tab, plus a host switcher, the **Manual scan** panel (JS / `.map` URLs or pasted code), the **Dump** panel, the **Search file contents** panel (grep the chunks for a string or `/regex/`) and **Wayback** (historical JS of the current host).
 - **Rescan** re-fetches and re-scans every file of the current host and re-collects the page and its iframes.
 - **Export:**
 
@@ -215,6 +216,7 @@ No build step and no runtime dependencies. Chrome / Edge 116+; the styled drop-d
   | **OpenAPI 3** | `.json` for Burp (Professional API scan, or the OpenAPI Parser extension in Community), Caido (ReDocs plugin), ZAP, Insomnia |
   | **Postman collection** | v2.1 `.json` for Postman, Insomnia and Caido (ReDocs plugin); `{{baseUrl}}`, `:id` path variables, JSON bodies, a GraphQL folder |
   | Send GET URLs to proxy | not a file: requests each concrete same-site GET URL once (active, see below) |
+  | Search file contents | not a file: greps every scanned JS file and rebuilt source of the host for a string or `/regex/` |
   | Dump static files | ZIP of JS files, `.map` files and rebuilt source trees |
   | Historical JS (Wayback) | not a file: fetches and scans archived JS / maps of the host |
 
@@ -274,7 +276,7 @@ src/runtime.js      opt-in hooks that run in the page's own world
 src/sourcemap.js    source-map parsing shared by worker and UI
 src/zip.js          small ZIP writer (deflate via CompressionStream)
 src/content.js      collects script URLs, inline scripts and DOM from pages and iframes
-ui/                 popup / dashboard / settings, dump.js (source reconstruction + dumper)
+ui/                 popup / dashboard / settings, dump.js (source reconstruction + dumper), search.js (content grep)
 icons/  fonts/      toolbar icons and logo; Inter and JetBrains Mono (SIL OFL)
 assets/             README banner and screenshots
 test/               Node tests

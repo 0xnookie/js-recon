@@ -25,6 +25,10 @@
           <svg class="i" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="5" rx="1.5" /><path d="M5 9v9.5A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5V9" /><path d="M10 13h4" /></svg>
           Dump
         </button>
+        <button id="btnSearchFiles" class="btn ghost full-only" title="Search the raw text of every scanned JS file and reconstructed source of this host for a string or /regex/ (e.g. ACTION_ID_)">
+          <svg class="i" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5" /><path d="m16 16 4 4" /></svg>
+          Search files
+        </button>
         <button id="btnWayback" class="btn ghost full-only" title="Fetch historical JS and source maps of this host from the Wayback Machine. Sends the host name to web.archive.org.">
           <svg class="i" viewBox="0 0 24 24"><path d="M3.5 12a8.5 8.5 0 1 0 2.6-6.1" /><path d="M3.5 4.5v4h4" /><path d="M12 8v4.2l2.8 1.8" /></svg>
           Wayback
@@ -55,6 +59,7 @@
             <button data-export="replay" id="replayItem" title="Requests every concrete, harmless-looking GET URL of this host once, so it appears in the site map of the proxy your browser uses (Burp, Caido, ZAP). Active: sends requests to the target.">Send GET URLs to proxy… <span class="hint">active</span></button>
             <button data-export="probe" id="probeItem" title="Sends the same concrete, harmless-looking same-site GET requests once and records the HTTP status, so you can tell live (200), protected (401/403), wrong-method (405), redirecting (3xx) and dead (404) endpoints apart. Status shows next to each endpoint / API / route. Active: sends requests to the target.">Check which endpoints are live… <span class="hint">active</span></button>
             <hr />
+            <button data-export="find" title="Search the raw text of every scanned JS file and reconstructed source of this host for a string or /regex/ (e.g. ACTION_ID_). Opens the dashboard.">Search file contents… <span class="hint">grep · /regex/</span></button>
             <button data-export="dump">Dump static files… <span class="hint">.zip</span></button>
             <button data-export="wayback" title="Fetch historical JS and source maps of this host from the Wayback Machine. Sends the host name to web.archive.org.">Historical JS (Wayback) <span class="hint">archive.org</span></button>
           </div>
@@ -112,6 +117,25 @@
         <span id="dumpMsg" class="muted"></span>
         <button id="btnDumpGo" class="btn primary">Download ZIP</button>
       </div>
+    </section>
+
+    <section id="searchFiles" class="panel" hidden>
+      <div class="panel-title">
+        <b>Search file contents</b>
+        <span class="muted">Grep the raw text of every scanned JS file and the sources rebuilt from source maps for this host. Finds anything the detection rules miss — server-action refs, feature flags, internal hosts. Inline scripts aren't included (their text isn't stored).</span>
+      </div>
+      <div class="panel-row">
+        <input id="searchQuery" type="search" spellcheck="false" placeholder="String, or /regex/ — e.g. ACTION_ID_" />
+        <button id="btnSearchGo" class="btn primary">Search</button>
+      </div>
+      <div class="panel-row wrap">
+        <label class="chk" title="Treat the query as a JavaScript regular expression"><input type="checkbox" id="searchRegex" /> Regex</label>
+        <label class="chk" title="Match case exactly"><input type="checkbox" id="searchCase" /> Case-sensitive</label>
+        <label class="chk" title="Also search node_modules/* sources rebuilt from source maps"><input type="checkbox" id="searchNodeModules" /> incl. node_modules</label>
+        <span class="spacer"></span>
+        <span id="searchMsg" class="muted"></span>
+      </div>
+      <div id="searchResults" class="search-results"></div>
     </section>
 
     <div id="tabsBar" class="tabs-bar">
