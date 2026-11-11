@@ -21,6 +21,7 @@ const TABS = [
   { id: 'params', label: 'Params' },
   { id: 'deps', label: 'Deps' },
   { id: 'intel', label: 'Intel' },
+  { id: 'routes', label: 'Routes', optional: true },
   { id: 'sinks', label: 'Sinks', optional: true },
   { id: 'files', label: 'Files' },
 ];
@@ -159,7 +160,7 @@ const PARAM_DESC = {
 };
 
 function buildModel(data) {
-  const m = { secrets: [], api: [], endpoints: [], urls: [], domains: [], cloud: [], params: [], deps: [], intel: [], sinks: [], files: [], graphql: [] };
+  const m = { secrets: [], api: [], endpoints: [], urls: [], domains: [], cloud: [], params: [], deps: [], intel: [], sinks: [], routes: [], files: [], graphql: [] };
   if (!data) return m;
   const pageSite = siteOf((ui.host || '').replace(/:\d+$/, ''));
   const params = new Map();
@@ -247,6 +248,12 @@ function buildModel(data) {
   m.endpoints.sort(byInteresting);
   m.urls.sort(byInteresting);
   m.api.sort((a, b) => (b.tags?.includes('interesting') - a.tags?.includes('interesting')) || apiParts(a).path.localeCompare(apiParts(b).path) || a.value.localeCompare(b.value));
+  m.routes.sort(
+    (a, b) =>
+      (b.tags?.includes('interesting') - a.tags?.includes('interesting')) ||
+      (b.tags?.includes('guarded') - a.tags?.includes('guarded')) ||
+      a.value.localeCompare(b.value),
+  );
   m.files = Object.values(data.files).sort((a, b) => (b.ts || 0) - (a.ts || 0));
   return m;
 }
@@ -285,7 +292,7 @@ function makeMatcher(q) {
 
 const SEV_TABS = new Set(['secrets', 'intel', 'cloud', 'deps']);
 const NOISE_TABS = new Set(['endpoints', 'urls', 'intel', 'params']);
-const INTERESTING_TABS = new Set(['endpoints', 'urls', 'domains', 'api', 'params']);
+const INTERESTING_TABS = new Set(['endpoints', 'urls', 'domains', 'api', 'params', 'routes']);
 
 function filtered(tab) {
   const items = ui.model[tab] || [];
@@ -501,6 +508,25 @@ function apiRow(f) {
   return expandable(row, f.key, () => detailFor(f));
 }
 
+function routeRow(f) {
+  const openUrl = /^\//.test(f.value) && !/[:*]/.test(f.value) ? resolveUrl(f.value) : null;
+  const sub = f.meta?.component || f.meta?.name || (f.meta?.module ? `→ ${f.meta.module}` : f.meta?.redirectTo ? `→ ${f.meta.redirectTo}` : '');
+  const row = h(
+    'div',
+    { class: `row link${f.tags?.includes('guarded') ? ' sev-low' : ''}` },
+    head(
+      h('span', { class: 'value mono', title: f.value }, f.value),
+      sub ? h('span', { class: 'src mono', title: f.meta?.guard ? `guard: ${f.meta.guard}` : '' }, sub) : null,
+      chips(f.tags),
+      h('span', { class: 'spacer' }),
+      srcSummary(f),
+      openUrl && isHttp(openUrl) ? btn('Open', openUrl, () => chrome.tabs.create({ url: openUrl, active: false })) : null,
+      btn('Copy', 'Copy the route path', () => copy(f.value)),
+    ),
+  );
+  return expandable(row, f.key, () => detailFor(f));
+}
+
 const DEP_STATUS = { 'on-npm': 'on npm', 'not-on-npm': 'NOT on npm', 'scope-unclaimed': 'scope unclaimed', 'private-scope': 'private scope', unpublished: 'unpublished', unverified: 'unverified' };
 
 function depRow(f) {
@@ -608,6 +634,7 @@ const ROW = {
   urls: linkRow,
   domains: domainRow,
   params: paramRow,
+  routes: routeRow,
   files: fileRow,
 };
 const GROUPED = new Set(['intel', 'cloud', 'sinks', 'params']);
@@ -623,6 +650,7 @@ const EMPTY = {
   deps: 'No npm dependencies found. They are extracted from source maps, node_modules paths, imports and package.json blobs.',
   intel: 'Nothing here yet.',
   sinks: 'No DOM sinks — enable the sink rules in Settings.',
+  routes: 'No client-side routes found (React Router, Vue Router, Angular …).',
   files: 'No files scanned yet.',
 };
 
@@ -946,6 +974,7 @@ function textReport() {
   section('Parameters', m.params.map((p) => (p.kind === 'query' ? p.value : `${p.value}\t(${p.kind})`)));
   section('Dependencies', m.deps.map((f) => `[${f.severity.toUpperCase()}] ${f.value}\t${f.label}${f.meta?.latest ? '\tv' + f.meta.latest : ''}`));
   section('Intel', m.intel.map((f) => `[${f.severity}] ${f.label}: ${f.value}`));
+  section('Routes', m.routes.map((f) => `${f.value}${f.tags.length ? '\t[' + f.tags.join(',') + ']' : ''}${f.meta?.component ? '\t→ ' + f.meta.component : ''}`));
   section('Sinks', m.sinks.map((f) => `${f.label}: ${f.value}  (${f.sources.map(srcLabel).join(', ')})`));
   section('Lazy chunks (from the bundler runtime)', Object.keys(ui.data?.chunkUrls || {}).sort());
   section('Files', m.files.map((f) => `${f.kind}\t${f.url}${f.error ? '\t' + f.error : ''}`));
@@ -1041,6 +1070,19 @@ async function runReplay() {
 
 const absoluteUrls = () => [...new Set(endpointPaths().map(resolveUrl).filter((u) => isHttp(u) && !u.includes('${')))].sort();
 
+// Concrete client-side route paths (no :params or wildcards) → a path wordlist of real SPA pages.
+function routePaths() {
+  return [
+    ...new Set(
+      ui.model.routes
+        .map((f) => f.value)
+        .filter((v) => v && v !== '*' && v !== '**' && !v.includes('${') && !v.includes(':') && !v.includes('*'))
+        .map((v) => (v.startsWith('/') ? v : '/' + v))
+        .filter((v) => v.length > 1),
+    ),
+  ].sort();
+}
+
 const WORDLIST_FILES = [
   ['params.txt', 'query + body + form names (Arjun, x8, ffuf, Param Miner)'],
   ['query-params.txt', 'parameters read from / sent in the URL'],
@@ -1051,6 +1093,7 @@ const WORDLIST_FILES = [
   ['cookies.txt', 'cookie names'],
   ['storage-keys.txt', 'localStorage / sessionStorage keys'],
   ['paths.txt', 'endpoint and API paths'],
+  ['routes.txt', 'client-side router paths (SPA pages)'],
   ['path-segments.txt', 'single path segments for directory brute force'],
   ['urls.txt', 'absolute URLs (httpx, nuclei, katana)'],
   ['subdomains.txt', 'same-site hostnames (dnsx, httpx)'],
@@ -1083,7 +1126,8 @@ async function exportWordlists() {
     'cookies.txt': uniq(byKind('cookie')),
     'storage-keys.txt': uniq(byKind('storage')),
     'paths.txt': paths,
-    'path-segments.txt': uniq(paths.flatMap((p) => p.split('/')).filter((s) => /^[\w.~-]{1,80}$/.test(s))),
+    'routes.txt': routePaths(),
+    'path-segments.txt': uniq([...paths, ...routePaths()].flatMap((p) => p.split('/')).filter((s) => /^[\w.~-]{1,80}$/.test(s))),
     'urls.txt': absoluteUrls(),
     'subdomains.txt': uniq(m.domains.filter((d) => d.tags.includes('same-site') && !d.value.includes('*')).map((d) => d.value.replace(/:\d+$/, ''))),
   };

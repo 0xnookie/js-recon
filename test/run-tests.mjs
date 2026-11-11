@@ -496,6 +496,41 @@ for (const v of [
 check(apiRes.length === 11, `no API false positives (got ${apiRes.length}: ${apiRes.filter((v) => !/\/api|admin|legacy|users/.test(v)).join(', ')})`);
 check(analyze('axios.delete("/api/x")', rules).find((f) => f.category === 'api')?.tags.includes('write'), 'state-changing method tagged "write"');
 
+console.log('\nClient-side routes');
+const routeCode = `
+const r = createBrowserRouter([
+  { path: "/", element: <Home/> },
+  { path: "/admin", element: <RequireAuth><AdminPanel/></RequireAuth> },
+  { path: "/users/:id", element: <User/> },
+  { path: "/settings/billing", lazy: () => import("./routes/Billing") },
+]);
+const vue = [
+  { path: "/login", name: "login", component: Login },
+  { path: "/account", name: "account", component: Account, meta: { requiresAuth: true }, beforeEnter: authGuard },
+];
+const ng = [
+  { path: "internal", loadChildren: () => import("./internal/internal.module"), canActivate: [AuthGuard] },
+  { path: "public", component: PublicComponent },
+  { path: "**", redirectTo: "/404" },
+];
+const noise = { output: { path: path.resolve(__dirname, "dist") } };
+const icon = { path: "M12 2L2 7l10 5z" };
+const file = { path: "/etc/passwd" };
+const asset = { path: "assets/logo.svg" };`;
+const routes = analyze(routeCode, rules).filter((f) => f.category === 'routes');
+const routeVals = routes.map((f) => f.value);
+for (const v of ['/', '/admin', '/users/:id', '/settings/billing', '/login', '/account', 'internal', 'public', '**'])
+  check(routeVals.includes(v), `route: ${v}`);
+const routeByVal = (v) => routes.find((f) => f.value === v);
+check(routeByVal('/admin')?.tags.includes('guarded') && routeByVal('/admin')?.tags.includes('interesting'), '/admin guarded + interesting');
+check(routeByVal('/account')?.meta?.guard === 'beforeEnter', '/account guard = beforeEnter');
+check(routeByVal('internal')?.tags.includes('lazy') && routeByVal('internal')?.tags.includes('guarded'), 'Angular lazy + guarded route');
+check(routeByVal('/settings/billing')?.meta?.module === './routes/Billing', 'lazy import path captured');
+check(routeByVal('**')?.meta?.redirectTo === '/404', 'wildcard redirect target');
+check(routeByVal('/users/:id')?.meta?.component === 'User', 'route component captured');
+check(!routeVals.includes('/etc/passwd') && !routeVals.some((v) => v.startsWith('M12')) && !routeVals.includes('assets/logo.svg'),
+  `no route false positives (got: ${routeVals.join(', ')})`);
+
 console.log('\nCloud providers');
 const cloudCode = `
 "https://objectstorage.us-ashburn-1.oraclecloud.com/n/acmetenant/b/backups/o/db.tar"

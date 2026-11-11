@@ -13,6 +13,7 @@
 
 import { entropy, decodeJwt, SEV_RANK } from './util.js';
 import { graphqlAt } from './graphql.js';
+import { routeInfo } from './routes.js';
 
 export const CATEGORY_LABELS = {
   secrets: 'Secrets',
@@ -25,6 +26,7 @@ export const CATEGORY_LABELS = {
   deps: 'Dependencies',
   intel: 'Intel',
   sinks: 'DOM sinks',
+  routes: 'Routes',
 };
 
 const S = 'secrets';
@@ -846,6 +848,11 @@ export const RULES = [
       return g?.def.kind === 'fragment' ? { value: `fragment ${g.def.name} on ${g.def.on}`, meta: { document: g.document.slice(0, 8000) } } : null;
     },
   }),
+  // Client-side route tables (React Router, Vue Router, Angular, …): the app's own pages,
+  // including unlinked ones. post validates the surrounding object/element really is a route.
+  rule('route-def', 'Client-side route', 'routes', 'info',
+    /\bpath\s*[:=]\s*\{?\s*(["'`])((?:\\.|(?!\1)[^\\\r\n]){0,200}?)\1/g,
+    { group: 2, post: (v, m, ctx) => routeInfo(v, ctx.code, ctx.index), desc: 'A route from a client-side router. "guarded" means an auth/role guard protects it; these pages are often not linked anywhere in the UI.' }),
   rule('dev-comment', 'Developer Comment', I, 'info',
     /(?:\/\/|\/\*+|<!--)[ \t]*(?:TODO|FIXME|HACK|XXX|BUG|SECURITY|TEMP|DEPRECATED)\b[^\n]{0,160}/g,
     { post: (v) => ({ value: v.replace(/\s*(?:\*\/|-->)[\s\S]*$/, '').trim() }) }),

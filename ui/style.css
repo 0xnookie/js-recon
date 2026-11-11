@@ -1435,7 +1435,8 @@ a.value {
 }
 
 .chip.interesting,
-.chip.no-httponly {
+.chip.no-httponly,
+.chip.guarded {
   --c: var(--medium);
 }
 
@@ -1458,7 +1459,9 @@ a.value {
 }
 
 .chip.private-scope,
-.chip.in-code {
+.chip.in-code,
+.chip.lazy,
+.chip.redirect {
   --c: var(--text-2);
 }
 
