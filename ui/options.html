@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>JS Recon — Settings</title>
+    <link rel="preload" href="../fonts/Inter.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body class="options">
+    <header class="opt-header">
+      <div class="opt-wrap">
+        <div class="brand">
+          <img src="../icons/logo.svg" alt="" width="26" height="26" />
+          <span>JS Recon</span>
+          <span class="crumb">/ Settings</span>
+        </div>
+        <span id="saved" class="saved">Saved</span>
+        <span class="spacer"></span>
+        <a id="openDashboard" class="btn" href="popup.html?view=full">
+          <svg class="i" viewBox="0 0 24 24"><rect x="3.5" y="4" width="17" height="16" rx="2" /><path d="M3.5 9h17" /><path d="M9 9v11" /></svg>
+          Open dashboard
+        </a>
+      </div>
+    </header>
+
+    <section class="opt-wrap opt-hero">
+      <h1>Settings</h1>
+      <p>Control what gets scanned, which rules run, and where your findings are kept.</p>
+    </section>
+
+    <main class="opt-wrap">
+      <section class="card">
+        <h2>Scanning</h2>
+        <p>What gets collected while you browse. Everything is analysed locally, and findings never leave your browser.</p>
+        <div class="opt-grid">
+          <label class="opt"><input type="checkbox" data-key="enabled" /><div><b>Passive scanning</b><span>Scan JavaScript loaded by every page you visit (within scope).</span></div></label>
+          <label class="opt"><input type="checkbox" data-key="scanInline" /><div><b>Inline scripts</b><span>Scan &lt;script&gt; blocks embedded in the page, incl. JSON state (__NEXT_DATA__ …).</span></div></label>
+          <label class="opt"><input type="checkbox" data-key="scanHtml" /><div><b>Page DOM</b><span>Scan the rendered HTML: comments, links, data attributes, meta tags.</span></div></label>
+          <label class="opt"><input type="checkbox" data-key="fetchSourceMaps" /><div><b>Follow source maps</b><span>Fetch files referenced by sourceMappingURL and scan the original sources.</span></div></label>
+          <label class="opt"><input type="checkbox" data-key="probeSourceMaps" /><div><b>Guess source-map locations (active)</b><span>When a script has no sourceMappingURL, request <code>file.js.map</code>, then <code>file.map</code>. Sends extra requests to the target.</span></div></label>
+          <label class="opt"><input type="checkbox" data-key="skipNodeModules" /><div><b>Skip node_modules in source maps</b><span>Library sources produce noise; app code is what matters.</span></div></label>
+          <label class="opt"><input type="checkbox" data-key="fetchChunks" /><div><b>Fetch lazy-loaded chunks</b><span>Read the chunk list from the bundler runtime (webpack, Next.js, Vite, ES modules) and scan screens you never opened, admin bundles first. Max <input type="number" data-key="chunkLimit" min="1" max="5000" /> per host.</span></div></label>
+          <label class="opt"><input type="checkbox" data-key="captureHeaders" /><div><b>Response headers</b><span>Analyse the headers of the target's own responses: CORS-allowed request headers, CSP hosts and weaknesses, cookie names, server banners and custom headers. No extra requests.</span></div></label>
+          <label class="opt"><input type="checkbox" data-key="crawlJs" /><div><b>Crawl referenced JS</b><span>Fetch same-site .js files mentioned in scanned code (lazy chunks, admin bundles). Max <input type="number" data-key="crawlLimit" min="1" max="2000" /> per host.</span></div></label>
+          <label class="opt"><input type="checkbox" data-key="checkNpm" /><div><b>Dependency-confusion check</b><span>Look up discovered npm package names and scopes on registry.npmjs.org. A name missing from the public registry is reported as critical. This sends the package names to npm.</span></div></label>
+          <label class="opt"><input type="checkbox" data-key="firstPartyOnly" /><div><b>First-party scripts only</b><span>Ignore scripts served from other sites (CDNs, widgets).</span></div></label>
+          <label class="opt"><input type="checkbox" data-key="notify" /><div><b>Desktop notifications</b><span>Notify when a new high-severity secret is found.</span></div></label>
+          <div class="opt no-switch"><div><b>Limits</b><span>Max file size <input type="number" data-key="maxFileSizeMB" min="1" max="200" /> MB · parallel fetches <input type="number" data-key="concurrency" min="1" max="16" /></span></div></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Scope</h2>
+        <p>Hosts match themselves and all subdomains (<code>example.com</code> = <code>*.example.com</code>). One per line.</p>
+        <div class="radio-row">
+          <label><input type="radio" name="scopeMode" value="all" /> Scan all sites</label>
+          <label><input type="radio" name="scopeMode" value="allowlist" /> Only sites in the allow-list</label>
+        </div>
+        <div class="opt-grid">
+          <div class="field"><label>Allow-list (pages)</label><textarea data-key="allowHosts" data-list spellcheck="false" placeholder="target.com&#10;*.target-staging.io"></textarea><small>Used when “Only sites in the allow-list” is selected.</small></div>
+          <div class="field"><label>Deny-list (pages)</label><textarea data-key="denyHosts" data-list spellcheck="false" placeholder="mail.google.com&#10;mybank.com"></textarea><small>Pages on these hosts are never scanned.</small></div>
+        </div>
+        <div class="field" style="margin-top: 12px">
+          <label>Ignored script hosts</label>
+          <textarea data-key="ignoreScriptHosts" data-list spellcheck="false" style="min-height: 120px"></textarea>
+          <small>Scripts served from these hosts are skipped (analytics, ads, consent banners …). <button type="button" class="mini" id="resetIgnore">Reset to defaults</button></small>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Detection rules</h2>
+        <p>Built-in rules. The DOM-sink rules are off by default because they are noisy; turn them on to hunt for DOM XSS.</p>
+        <div class="row-actions">
+          <button type="button" class="btn" id="rulesAll">Enable all</button>
+          <button type="button" class="btn ghost" id="rulesDefault">Restore defaults</button>
+        </div>
+        <div id="rules"></div>
+      </section>
+
+      <section class="card">
+        <h2>Custom rules</h2>
+        <p>One rule per line: <code>Name | severity | regex</code>. Severity is <code>critical</code>, <code>high</code>, <code>medium</code>, <code>low</code> or <code>info</code> (info rules go to Intel). Write the regex as <code>/pattern/flags</code> or plain. If it has a capture group, group 1 is reported. Lines starting with <code>#</code> are ignored.</p>
+        <div class="field">
+          <textarea id="customRules" spellcheck="false" style="min-height: 140px" placeholder="# Examples&#10;ACME internal token | high | /acme_tok_[A-Za-z0-9]{32}/&#10;Feature flag | info | /featureFlags\.(\w+)/"></textarea>
+        </div>
+        <div class="row-actions">
+          <button type="button" class="btn primary" id="saveCustom">Save custom rules</button>
+          <span id="customStatus" class="muted"></span>
+        </div>
+        <div id="customErrors" class="errors"></div>
+      </section>
+
+      <section class="card">
+        <h2>Data</h2>
+        <p id="usage" class="muted">…</p>
+        <div class="row-actions">
+          <button type="button" class="btn" id="exportAll">Export all (JSON)</button>
+          <button type="button" class="btn ghost danger" id="clearAll">Delete all findings</button>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

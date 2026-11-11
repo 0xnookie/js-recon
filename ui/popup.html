@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>JS Recon</title>
+    <link rel="preload" href="../fonts/Inter.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body class="popup">
+    <header class="topbar">
+      <div class="brand">
+        <img src="../icons/logo.svg" alt="" width="24" height="24" />
+        <span>JS Recon</span>
+      </div>
+      <span class="divider"></span>
+      <select id="hostSelect" class="host-select" title="Host"><button type="button"><selectedcontent></selectedcontent></button></select>
+      <span id="status" class="status"></span>
+      <div class="actions">
+        <button id="btnManual" class="btn ghost full-only" title="Scan URLs or pasted code">
+          <svg class="i" viewBox="0 0 24 24"><path d="m8 8-4 4 4 4" /><path d="m16 8 4 4-4 4" /><path d="m13.5 5-3 14" /></svg>
+          Manual scan
+        </button>
+        <button id="btnDump" class="btn ghost full-only" title="Download the JS files, source maps and reconstructed sources of one or more hosts">
+          <svg class="i" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="5" rx="1.5" /><path d="M5 9v9.5A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5V9" /><path d="M10 13h4" /></svg>
+          Dump
+        </button>
+        <button id="btnRescan" class="btn primary" title="Re-fetch and re-scan every file for this host">
+          <svg class="i" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.34-5.66L20 8.5" /><path d="M20 4v4.5h-4.5" /></svg>
+          Rescan
+        </button>
+        <details id="exportMenu" class="menu">
+          <summary class="btn" title="Export findings">
+            <svg class="i" viewBox="0 0 24 24"><path d="M12 4v11" /><path d="m7.5 10.5 4.5 4.5 4.5-4.5" /><path d="M5 20h14" /></svg>
+            Export
+            <svg class="i chev" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6" /></svg>
+          </summary>
+          <div class="menu-list">
+            <button data-export="json">JSON report <span class="hint">this host</span></button>
+            <button data-export="txt">Text report <span class="hint">.txt</span></button>
+            <button data-export="urls">Endpoints + API as URLs <span class="hint">ffuf / httpx</span></button>
+            <button data-export="api">API endpoints <span class="hint">METHOD URL</span></button>
+            <button data-export="all">JSON report <span class="hint">all hosts</span></button>
+            <hr />
+            <button data-export="dump">Dump static files… <span class="hint">.zip</span></button>
+          </div>
+        </details>
+        <span class="divider"></span>
+        <button id="btnPause" class="btn icon ghost" title="Pause passive scanning">
+          <svg class="i i-pause" viewBox="0 0 24 24"><rect x="6.5" y="5" width="3.5" height="14" rx="1" /><rect x="14" y="5" width="3.5" height="14" rx="1" /></svg>
+          <svg class="i i-play" viewBox="0 0 24 24"><path d="M7.5 5.5v13l11-6.5z" /></svg>
+        </button>
+        <button id="btnClear" class="btn icon ghost danger" title="Delete stored findings for this host">
+          <svg class="i" viewBox="0 0 24 24"><path d="M4 7h16" /><path d="M9.5 7V4.5h5V7" /><path d="M6.5 7l.9 12a1.5 1.5 0 0 0 1.5 1.4h6.2a1.5 1.5 0 0 0 1.5-1.4l.9-12" /></svg>
+          <span class="lbl">Sure?</span>
+        </button>
+        <button id="btnFull" class="btn icon ghost popup-only" title="Open the dashboard in a tab">
+          <svg class="i" viewBox="0 0 24 24"><path d="M14.5 4H20v5.5" /><path d="M9.5 20H4v-5.5" /><path d="M20 4l-6.5 6.5" /><path d="M4 20l6.5-6.5" /></svg>
+        </button>
+        <button id="btnOptions" class="btn icon ghost" title="Settings">
+          <svg class="i" viewBox="0 0 24 24"><path d="M4 7h9" /><path d="M18 7h2" /><circle cx="15.5" cy="7" r="2.3" /><path d="M4 17h3" /><path d="M12 17h8" /><circle cx="9.5" cy="17" r="2.3" /></svg>
+        </button>
+      </div>
+    </header>
+
+    <div id="pausedBanner" class="banner" hidden>Passive scanning is paused. Rescan and manual scans still work.</div>
+
+    <section id="manual" class="panel" hidden>
+      <div class="panel-title"><b>Manual scan</b><span class="muted">Scan JS / .map URLs or a pasted snippet.</span></div>
+      <div class="panel-row">
+        <label>Store results under host <input id="manualHost" type="text" placeholder="(derived from URL)" spellcheck="false" /></label>
+      </div>
+      <textarea id="manualInput" spellcheck="false" placeholder="One JS / .map URL per line — or paste JavaScript code"></textarea>
+      <div class="panel-row">
+        <button id="btnScanUrls" class="btn primary">Scan URLs</button>
+        <button id="btnScanCode" class="btn">Scan as code</button>
+        <span id="manualMsg" class="muted"></span>
+      </div>
+    </section>
+
+    <section id="dump" class="panel" hidden>
+      <div class="panel-title">
+        <b>Dump static files</b>
+        <span class="muted">One ZIP with every scanned JS file, the .map files and the source trees rebuilt from them. Feed it to grep, semgrep, trufflehog or your own tools.</span>
+      </div>
+      <div class="panel-row wrap">
+        <label class="chk"><input type="checkbox" id="dumpJs" checked /> JS files</label>
+        <label class="chk"><input type="checkbox" id="dumpMaps" checked /> .map files</label>
+        <label class="chk"><input type="checkbox" id="dumpSources" checked /> Reconstructed sources</label>
+        <label class="chk"><input type="checkbox" id="dumpNodeModules" /> incl. node_modules sources</label>
+      </div>
+      <div id="dumpHosts" class="host-list"></div>
+      <div class="panel-row">
+        <button id="dumpAll" class="btn">Select all</button>
+        <button id="dumpNone" class="btn">None</button>
+        <span class="spacer"></span>
+        <span id="dumpMsg" class="muted"></span>
+        <button id="btnDumpGo" class="btn primary">Download ZIP</button>
+      </div>
+    </section>
+
+    <div id="tabsBar" class="tabs-bar">
+      <nav id="tabs" class="tabs"></nav>
+      <button class="tab-scroll left" data-dir="-1" tabindex="-1" aria-hidden="true" title="Scroll tabs left">
+        <svg class="i" viewBox="0 0 24 24"><path d="m15 6-6 6 6 6" /></svg>
+      </button>
+      <button class="tab-scroll right" data-dir="1" tabindex="-1" aria-hidden="true" title="Scroll tabs right">
+        <svg class="i" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6" /></svg>
+      </button>
+    </div>
+
+    <div class="toolbar">
+      <input id="search" type="search" placeholder="Filter or /regex/" title="Plain text, or a regular expression written as /pattern/" spellcheck="false" />
+      <select id="sevFilter" title="Minimum severity">
+        <option value="all">All severities</option>
+        <option value="critical">Critical</option>
+        <option value="high">≥ High</option>
+        <option value="medium">≥ Medium</option>
+        <option value="low">≥ Low</option>
+      </select>
+      <label class="chk" id="tentativeWrap" title="Hide secrets whose value has low Shannon entropy"><input type="checkbox" id="hideTentative" /> Hide tentative</label>
+      <label class="chk" id="noiseWrap" title="Hide static assets (images, css, fonts) and library/documentation noise"><input type="checkbox" id="hideNoise" /> Hide noise</label>
+      <label class="chk" id="interestingWrap" title="Only paths that look sensitive (admin, debug, upload, token, graphql …)"><input type="checkbox" id="onlyInteresting" /> Interesting</label>
+      <label class="chk" id="absWrap" title="Resolve relative paths against the site origin"><input type="checkbox" id="absolute" /> Absolute</label>
+      <span class="spacer"></span>
+      <span id="count" class="muted"></span>
+      <button id="btnCopy" class="btn" title="Copy the filtered list">
+        <svg class="i" viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="11.5" height="11.5" rx="2" /><path d="M15.5 8.5V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7.5a2 2 0 0 0 2 2h2.5" /></svg>
+        Copy
+      </button>
+    </div>
+
+    <main id="list" class="list"></main>
+    <div id="toast" class="toast" hidden></div>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>
