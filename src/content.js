@@ -53,7 +53,7 @@
   async function getSettings() {
     try {
       const { settings = {} } = await chrome.storage.local.get('settings');
-      return { enabled: true, scanInline: true, scanHtml: true, scopeMode: 'all', allowHosts: [], denyHosts: [], ...settings };
+      return { enabled: true, scanInline: true, scanHtml: true, scopeMode: 'active', allowHosts: [], denyHosts: [], ...settings };
     } catch {
       return null; // extension was reloaded; this content script is orphaned
     }

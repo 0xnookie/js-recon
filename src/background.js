@@ -292,6 +292,7 @@ async function refreshAllBadges() {
 }
 
 chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
+  if (info.url) activeCollected.delete(tabId); // navigated: let active-tab mode re-scan it when focused
   if (info.status === 'complete' || info.url) setBadge(tabId, hostOf(tab.url || ''));
 });
 
@@ -1075,7 +1076,50 @@ async function checkDependency(job) {
 
 // ───────────────────────── scope ─────────────────────────
 
-function scopeFor(pageUrl, s) {
+// "Active tab" scope: only the tab the user is actually looking at is scanned, not every open
+// background tab. We track the frontmost tab of each window; a page is in scope only if its tab is
+// one of them. tabId < 0 (our own fetches) and forced collects (explicit Rescan) bypass this check.
+const activeByWindow = new Map(); // windowId → tabId of its active tab
+const activeCollected = new Set(); // tabIds already collected since becoming active (avoids re-scan storms)
+
+function isActiveTab(tabId) {
+  if (tabId == null || tabId < 0) return false;
+  for (const id of activeByWindow.values()) if (id === tabId) return true;
+  return false;
+}
+
+async function initActiveTabs() {
+  try {
+    for (const t of await chrome.tabs.query({ active: true })) {
+      if (t.windowId != null && t.id != null) activeByWindow.set(t.windowId, t.id);
+    }
+  } catch {
+    /* ignore */
+  }
+}
+initActiveTabs();
+
+chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
+  activeByWindow.set(windowId, tabId);
+  // In active-tab mode, a background tab was skipped while it loaded; scan it now that it's in front.
+  if (activeCollected.has(tabId)) return;
+  try {
+    const { settings } = await ready();
+    if (!settings.enabled || settings.scopeMode !== 'active') return;
+    activeCollected.add(tabId);
+    chrome.tabs.sendMessage(tabId, { type: 'collect', force: true }).catch(() => {});
+  } catch {
+    /* ignore */
+  }
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  activeCollected.delete(tabId);
+  for (const [w, id] of activeByWindow) if (id === tabId) activeByWindow.delete(w);
+});
+chrome.windows?.onRemoved?.addListener((windowId) => activeByWindow.delete(windowId));
+
+function scopeFor(pageUrl, s, tabId) {
   let u;
   try {
     u = new URL(pageUrl);
@@ -1085,6 +1129,7 @@ function scopeFor(pageUrl, s) {
   if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
   if (hostMatches(u.hostname, s.denyHosts)) return null;
   if (s.scopeMode === 'allowlist' && !hostMatches(u.hostname, s.allowHosts)) return null;
+  if (s.scopeMode === 'active' && tabId != null && tabId >= 0 && !isActiveTab(tabId)) return null;
   return { host: u.host, origin: u.origin };
 }
 
@@ -1114,7 +1159,7 @@ async function onScriptLoaded(details) {
   const { settings } = await ready();
   if (!settings.enabled) return;
   const pageUrl = await tabUrl(details.tabId);
-  const scope = scopeFor(pageUrl, settings);
+  const scope = scopeFor(pageUrl, settings, details.tabId);
   if (!scope || !scriptAllowed(details.url, scope, settings)) return;
   enqueue({ kind: 'external', host: scope.host, origin: scope.origin, id: details.url, url: details.url, pageUrl });
 }
@@ -1134,7 +1179,7 @@ async function onResponseHeaders(d) {
   const { settings } = await ready();
   if (!settings.enabled || !settings.captureHeaders) return;
   const pageUrl = d.type === 'main_frame' ? d.url : await tabUrl(d.tabId);
-  const scope = scopeFor(pageUrl, settings);
+  const scope = scopeFor(pageUrl, settings, d.tabId);
   if (!scope) return;
   let u;
   try {
@@ -1189,7 +1234,7 @@ async function onRequestSent(d) {
   const { settings } = await ready();
   if (!settings.enabled || !settings.observeRequests) return;
   const pageUrl = await tabUrlCached(d.tabId);
-  const scope = scopeFor(pageUrl, settings);
+  const scope = scopeFor(pageUrl, settings, d.tabId);
   if (!scope || !scriptAllowed(d.url.replace(/^ws/i, 'http'), scope, settings)) return; // ignored hosts / first-party only
   const results = observedRequest({ method: d.method, url: d.url, type: d.type, pageOrigin: scope.origin, requestHeaders: d.requestHeaders });
   if (!results.length) return;
@@ -1225,7 +1270,7 @@ async function onRuntimeCollect(msg, sender) {
   const { settings } = await ready();
   if (!settings.enabled || !settings.runtimeHooks) return { ok: false };
   const pageUrl = sender.tab?.url || msg.pageUrl;
-  const scope = scopeFor(pageUrl, settings);
+  const scope = scopeFor(pageUrl, settings, sender.tab?.id);
   if (!scope) return { ok: false };
   const isFrame = !!msg.frame || (sender.frameId ?? 0) > 0;
   if (isFrame && !scriptAllowed(msg.pageUrl, scope, settings)) return { ok: false };
@@ -1283,7 +1328,7 @@ async function onPageCollect(msg, sender) {
   if (!settings.enabled && !msg.force) return { ok: false };
   // findings are filed under the tab's (top page's) host, like the scripts the page loads
   const pageUrl = sender.tab?.url || msg.pageUrl;
-  const scope = scopeFor(pageUrl, settings);
+  const scope = scopeFor(pageUrl, settings, msg.force ? -1 : sender.tab?.id);
   if (!scope) return { ok: false, reason: 'out of scope' };
   const isFrame = !!msg.frame || (sender.frameId ?? 0) > 0;
   // iframes are treated like scripts: ignored hosts (ads, analytics, video) and "first-party only" apply

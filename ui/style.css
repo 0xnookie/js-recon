@@ -231,11 +231,11 @@ svg.i {
 }
 
 /* icons carry their own inner whitespace; trim the padding on that side so the content looks centred */
-.btn:has(> svg.i:first-child) {
+.btn:not(.icon):has(> svg.i:first-child) {
   padding-left: 10px;
 }
 
-.btn:has(> svg.i.chev:last-child) {
+.btn:not(.icon):has(> svg.i.chev:last-child) {
   padding-right: 8px;
 }
 

@@ -22,7 +22,7 @@ JS Recon
 [![Bundlers](https://img.shields.io/badge/Lazy%20chunks-webpack%20%7C%20Next.js%20%7C%20Vite%20%7C%20ESM-8A2BE2)]()
 [![Dependencies](https://img.shields.io/badge/Runtime%20deps-0-brightgreen)]()
 [![Build](https://img.shields.io/badge/Build%20step-none-lightgrey)]()
-[![Version](https://img.shields.io/badge/Version-1.5.0-orange)]()
+[![Version](https://img.shields.io/badge/Version-1.6.0-orange)]()
 [![PRs](https://img.shields.io/badge/PRs-welcome-brightgreen)]()
 
 </div>
@@ -238,7 +238,7 @@ Everything below runs locally. This is all the traffic the extension itself crea
 | Crawl referenced JS | **off** | requests same-site `.js` URLs found in code |
 | Send GET URLs to proxy | manual, two clicks (Export menu) | one GET per concrete same-site URL, max 500, with your cookies; skips URLs with placeholders and anything that sounds state-changing (logout, delete, reset, revoke …); redirects are not followed |
 
-**Scope:** scan all sites or an allow-list, never scan a deny-list, ignore analytics / ad / consent scripts (editable), optionally first-party scripts only. Iframes follow the same filters as scripts. Every rule can be switched off individually.
+**Scope:** by default only the **active tab** is scanned — the page you are actually looking at — so background tabs are left alone until you switch to them. You can widen this to every open tab or narrow it to an allow-list; a deny-list is never scanned in any mode. Analytics / ad / consent scripts are ignored (editable), and scripts can optionally be restricted to first-party only. Iframes follow the same filters as scripts. Every rule can be switched off individually.
 
 ---
 

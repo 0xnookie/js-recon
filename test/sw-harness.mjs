@@ -58,7 +58,7 @@ globalThis.fetch = async (url) => {
 
 // ── chrome mock ──
 const mem = {};
-const listeners = { storage: [], webRequest: [], sendHeaders: [], message: [], tabsUpdated: [] };
+const listeners = { storage: [], webRequest: [], sendHeaders: [], message: [], tabsUpdated: [], tabsActivated: [], tabsRemoved: [] };
 const registered = new Map(); // dynamically registered content scripts
 const clone = (v) => (v === undefined ? undefined : structuredClone(v));
 const badges = {};
@@ -95,13 +95,16 @@ globalThis.chrome = {
     onBeforeSendHeaders: { addListener: (l) => listeners.sendHeaders.push(l) },
   },
   tabs: {
-    get: async (id) => ({ id, url: PAGE }),
-    query: async () => [{ id: 7, url: PAGE }],
+    get: async (id) => ({ id, windowId: 1, url: PAGE }),
+    query: async () => [{ id: 7, windowId: 1, url: PAGE }],
     sendMessage: async () => {
       throw new Error('no receiver');
     },
     onUpdated: { addListener: (l) => listeners.tabsUpdated.push(l) },
+    onActivated: { addListener: (l) => listeners.tabsActivated.push(l) },
+    onRemoved: { addListener: (l) => listeners.tabsRemoved.push(l) },
   },
+  windows: { onRemoved: { addListener: () => {} } },
   scripting: {
     executeScript: async () => [],
     getRegisteredContentScripts: async ({ ids } = {}) => [...registered.values()].filter((s) => !ids || ids.includes(s.id)),
@@ -138,8 +141,8 @@ const check = (cond, msg) => {
   if (!cond) failures++;
 };
 
-// enable crawling for this run
-mem.settings = { crawlJs: true };
+// enable crawling for this run; scope 'all' so the capture tests below aren't gated to one active tab
+mem.settings = { crawlJs: true, scopeMode: 'all' };
 await import('../src/background.js');
 
 console.log('Passive capture via webRequest');
@@ -394,6 +397,20 @@ fire('https://app.acme.test/static/new.js');
 await drain();
 check(fetched.length === before, 'deny-listed page host not scanned');
 await chrome.storage.local.set({ settings: { ...mem.settings, denyHosts: [] } });
+
+// active-tab mode: only the frontmost tab (7, window 1) is scanned; a background tab (99) is skipped
+await chrome.storage.local.set({ settings: { ...mem.settings, scopeMode: 'active' } });
+listeners.tabsActivated.forEach((l) => l({ tabId: 7, windowId: 1 }));
+const beforeActive = fetched.length;
+FILES['https://app.acme.test/static/bg-tab.js'] = { body: 'x' };
+fire('https://app.acme.test/static/bg-tab.js', 'script', 99);
+await drain();
+check(fetched.length === beforeActive, 'background tab not scanned in active-tab mode');
+FILES['https://app.acme.test/static/active-tab.js'] = { body: 'x' };
+fire('https://app.acme.test/static/active-tab.js', 'script', 7);
+await drain();
+check(fetched.length === beforeActive + 1, 'active tab scanned in active-tab mode');
+await chrome.storage.local.set({ settings: { ...mem.settings, scopeMode: 'all' } });
 
 console.log('\nStatic file dumper & source reconstruction');
 {
