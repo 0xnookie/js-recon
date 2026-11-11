@@ -245,10 +245,11 @@ Everything below runs locally. This is all the traffic the extension itself crea
 ## 🧪 Tests
 
 ```bash
-node test/run-tests.mjs        # rules, inputs, headers, lazy chunks, postMessage, routes, DOM-XSS taint flows,
-                               # observed requests, GraphQL + schema, OpenAPI / Postman, Wayback order, ZIP, 6 MB perf check
+node test/run-tests.mjs        # rules, inputs, headers, lazy chunks, postMessage, routes, DOM-XSS taint, offline enrichment
+                               # (AWS/GCP/Firebase + JWT expiry), provider-token rules, observed requests, GraphQL + schema,
+                               # OpenAPI / Postman / SARIF, Wayback order, ZIP, 6 MB perf check
 node test/sw-harness.mjs       # service worker end to end with mocked chrome.*, fetch, npm and archive.org: iframes, chunks,
-                               # headers, observed traffic, runtime hooks, Wayback, change alerts, send to proxy, dumper
+                               # headers, observed traffic, runtime hooks, Wayback, change alerts, send to proxy, endpoint liveness, dumper
 node test/fp-sweep.mjs <dir>   # scan a directory of real JS and list secret hits (false-positive check)
 ```
 
@@ -264,7 +265,7 @@ src/rules.js        rules, link / API / input classification, postMessage analys
 src/chunks.js       lazy-chunk discovery (webpack chunk-map evaluator, Next.js, Vite, ESM)
 src/routes.js       client-side route-map extraction (React Router, Vue Router, Angular)
 src/taint.js        DOM-XSS taint flows (source → sink in one expression)
-src/enrich.js       offline secret enrichment (AWS key → account number, example / demo triage)
+src/enrich.js       offline secret enrichment (AWS key → account number, GCP/Firebase → project, JWT expiry, example / demo triage)
 src/headers.js      response-header analysis (CORS, CSP, cookies, banners, custom headers)
 src/requests.js     observed requests (path normalisation, parameter / header names), script families, Wayback order
 src/graphql.js      GraphQL document extraction, parser and schema sketch
