@@ -15,6 +15,7 @@ import { entropy, decodeJwt, SEV_RANK } from './util.js';
 import { graphqlAt } from './graphql.js';
 import { routeInfo } from './routes.js';
 import { taintAt } from './taint.js';
+import { enrichAwsKey } from './enrich.js';
 
 export const CATEGORY_LABELS = {
   secrets: 'Secrets',
@@ -689,7 +690,8 @@ const rule = (id, label, category, severity, re, extra = {}) => ({ id, label, ca
 
 export const RULES = [
   // ── Cloud provider credentials ──
-  rule('aws-access-key', 'AWS Access Key ID', S, 'high', /\b(?:AKIA|ASIA|ABIA|ACCA|A3T[A-Z0-9])[A-Z0-9]{16}\b/g, { post: notPlaceholder }),
+  rule('aws-access-key', 'AWS Access Key ID', S, 'high', /\b(?:AKIA|ASIA|ABIA|ACCA|A3T[A-Z0-9])[A-Z0-9]{16}\b/g,
+    { post: enrichAwsKey, desc: 'Owning account number and key type are decoded offline from the key ID itself — no request is sent to AWS. Verify with: aws sts get-access-key-info --access-key-id <id>' }),
   rule('aws-secret-key', 'AWS Secret Access Key', S, 'high',
     /(?:(?:aws|amazon)[\w.-]{0,20}?(?:secret|sk)[\w.-]{0,20}?|secret_?access_?key)["'`]?\s*[:=]{1,3}\s*["'`]([A-Za-z0-9/+]{40})["'`]/gi,
     { group: 1, generic: true, post: (v) => notPlaceholder(v) && entropy(v) > 3.5 }),

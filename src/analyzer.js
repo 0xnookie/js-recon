@@ -3,6 +3,7 @@
 // unit-tested with Node.
 
 import { secretConfidence } from './rules.js';
+import { exampleSignals } from './enrich.js';
 
 const DATA_URI_BLOB_RE = /(data:[\w/+.-]{1,100};base64,)([A-Za-z0-9+/=]{512,})/g;
 const LONG_BLOB_RE = /(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{3000,}={0,2}/g;
@@ -123,6 +124,13 @@ export function analyze(code, rules, opts = {}) {
           const { entropy, confidence } = secretConfidence(value, rule.generic);
           finding.entropy = Math.round(entropy * 100) / 100;
           finding.confidence = confidence;
+          // Offline triage: flag values that look like demo / example credentials (never dropped,
+          // only tagged, so the user can deprioritise them without losing the hit).
+          const signals = exampleSignals(value);
+          if (signals.length) {
+            if (!finding.tags.includes('example')) finding.tags = [...finding.tags, 'example'];
+            if (!finding.meta?.example) finding.meta = { ...(finding.meta || {}), example: signals.join('; ') };
+          }
         }
         found.set(key, finding);
         n++;

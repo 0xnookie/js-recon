@@ -567,6 +567,37 @@ check(taint.find((f) => f.value === 'location.hash → innerHTML')?.severity ===
 const taintFP = analyze(taintNeg, rules).filter((f) => f.category === 'sinks' && f.tags.includes('tainted'));
 check(taintFP.length === 0, `no taint false positives (got: ${taintFP.map((f) => f.value).join(', ')})`);
 
+console.log('\nOffline enrichment (AWS account ID, example triage)');
+{
+  const { awsAccountId, exampleSignals, looksLikeExample } = await import('../src/enrich.js');
+  // Verified key ID → account number vectors (keyhog-scanner / aws_account_id_from_key_id).
+  for (const [key, acct] of [
+    ['ASIAY34FZKBOKMUTVV7A', '609629065308'],
+    ['AKIASP2TPHJSQH3FJXYZ', '171436882533'],
+    ['AKIA2222222222222222', '744830457525'],
+  ]) check(awsAccountId(key) === acct, `AWS ${key} → account ${acct} (offline)`);
+  check(awsAccountId('not-a-key') === null, 'non-key → null');
+  check(awsAccountId('AKIA0000000000000001') === null, 'invalid base32 chars (0/1) → null');
+
+  const akia = analyze('const cfg = { accessKeyId: "AKIASP2TPHJSQH3FJXYZ" };', rules).find((f) => f.rule === 'aws-access-key');
+  check(akia?.meta?.account === '171436882533', 'AWS key finding carries decoded account id');
+  check(akia?.meta?.['key type'] === 'long-term (IAM user)', 'AWS key finding carries key type');
+  check(!(akia?.tags || []).includes('example'), 'real-looking AWS key not flagged example');
+
+  const asia = analyze('x = "ASIAY34FZKBOKMUTVV7A"', rules).find((f) => f.rule === 'aws-access-key');
+  check(asia?.tags?.includes('temporary'), 'ASIA key tagged temporary (STS)');
+
+  const demo = analyze('const k = "AKIA2222222222222222";', rules).find((f) => f.rule === 'aws-access-key');
+  check(demo?.tags?.includes('example'), 'structurally-synthetic AWS key tagged example');
+  check(demo?.meta?.account === '744830457525', 'example key still decodes its account');
+
+  check(looksLikeExample('abcdefghijklmnop'), 'sequential run → example');
+  check(looksLikeExample('token_deadbeef_cafebabe'), 'demo marker → example');
+  check(looksLikeExample('aaaaa_secret_value'), 'repeated run → example');
+  check(exampleSignals('ghp_R3dStr1keQw9pLmZx7bN2vK4tH8cF6dA1eU0').length === 0, 'genuine high-entropy token not flagged');
+  check(!looksLikeExample('k9Qm2vX7bR4tLp8aZ6cH3dNj5sYg1wF0'), 'realistic high-entropy value not flagged');
+}
+
 console.log('\nCloud providers');
 const cloudCode = `
 "https://objectstorage.us-ashburn-1.oraclecloud.com/n/acmetenant/b/backups/o/db.tar"

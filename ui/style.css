@@ -1455,20 +1455,23 @@ a.value {
 }
 
 .chip.cloud,
-.chip.new {
+.chip.new,
+.chip.acct-known {
   --c: var(--cyan);
 }
 
 .chip.private-scope,
 .chip.in-code,
 .chip.lazy,
-.chip.redirect {
+.chip.redirect,
+.chip.temporary {
   --c: var(--text-2);
 }
 
 .chip.conf.tentative,
 .chip.noise,
-.chip.static {
+.chip.static,
+.chip.example {
   --c: var(--muted);
 }
 
