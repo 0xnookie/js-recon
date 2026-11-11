@@ -45,7 +45,12 @@
             <button data-export="urls">Endpoints + API as URLs <span class="hint">ffuf / httpx</span></button>
             <button data-export="api">API endpoints <span class="hint">METHOD URL</span></button>
             <button data-export="wordlists">Wordlists <span class="hint">ffuf / Arjun · .zip</span></button>
+            <button data-export="graphql">GraphQL schema + operations <span class="hint">.graphql</span></button>
             <button data-export="all">JSON report <span class="hint">all hosts</span></button>
+            <hr />
+            <button data-export="openapi">OpenAPI 3 <span class="hint">Burp · Caido · ZAP</span></button>
+            <button data-export="postman">Postman collection <span class="hint">Caido · Postman</span></button>
+            <button data-export="replay" id="replayItem" title="Requests every concrete, harmless-looking GET URL of this host once, so it appears in the site map of the proxy your browser uses (Burp, Caido, ZAP). Active: sends requests to the target.">Send GET URLs to proxy… <span class="hint">active</span></button>
             <hr />
             <button data-export="dump">Dump static files… <span class="hint">.zip</span></button>
             <button data-export="wayback" title="Fetch historical JS and source maps of this host from the Wayback Machine. Sends the host name to web.archive.org.">Historical JS (Wayback) <span class="hint">archive.org</span></button>
@@ -70,6 +75,7 @@
     </header>
 
     <div id="pausedBanner" class="banner" hidden>Passive scanning is paused. Rescan and manual scans still work.</div>
+    <div id="changeBanner" class="banner change" hidden></div>
 
     <section id="manual" class="panel" hidden>
       <div class="panel-title"><b>Manual scan</b><span class="muted">Scan JS / .map URLs or a pasted snippet.</span></div>
@@ -127,6 +133,7 @@
       <label class="chk" id="tentativeWrap" title="Hide secrets whose value has low Shannon entropy"><input type="checkbox" id="hideTentative" /> Hide tentative</label>
       <label class="chk" id="noiseWrap" title="Hide static assets (images, css, fonts) and library/documentation noise"><input type="checkbox" id="hideNoise" /> Hide noise</label>
       <label class="chk" id="interestingWrap" title="Only paths that look sensitive (admin, debug, upload, token, graphql …)"><input type="checkbox" id="onlyInteresting" /> Interesting</label>
+      <label class="chk" id="newWrap" title="Only findings that first appeared in the latest version of the app's bundle" hidden><input type="checkbox" id="onlyNew" /> New</label>
       <label class="chk" id="absWrap" title="Resolve relative paths against the site origin"><input type="checkbox" id="absolute" /> Absolute</label>
       <span class="spacer"></span>
       <span id="count" class="muted"></span>

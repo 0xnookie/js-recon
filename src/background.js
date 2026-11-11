@@ -3,7 +3,8 @@
 
 import { analyze } from './analyzer.js';
 import { buildRules, makeSubdomainRule, packageRoot, classifyLink, INTERESTING_RE, inputFinding, apiEndpoint, analyzeMessageHandler, POSTMESSAGE_DESC } from './rules.js';
-import { observedRequest, normalizePath, orderCaptures } from './requests.js';
+import { observedRequest, normalizePath, orderCaptures, scriptFamily } from './requests.js';
+import { replayCandidates } from './exporters.js';
 import { DEFAULT_SETTINGS, getSettings } from './settings.js';
 import { SEV_RANK, sha1, siteOf, hostMatches, hostOf, truncate } from './util.js';
 import { sourceMapRef, decodeDataUri, parseSourceMap, mapEntries, cleanSourcePath, probeCandidates } from './sourcemap.js';
@@ -206,6 +207,7 @@ function mergeFindings(data, results, src) {
       if (r.desc) f.desc = r.desc;
       if (r.confidence) Object.assign(f, { confidence: r.confidence, entropy: r.entropy });
       if (r.severity === 'high' || r.severity === 'critical') alerts.push(f);
+      src.newKeys?.push(key);
     } else if ((SEV_RANK[r.severity] || 0) > (SEV_RANK[f.severity] || 0)) {
       f.severity = r.severity;
       f.label = r.label;
@@ -357,6 +359,7 @@ async function runJob(job) {
   if (job.kind === 'text') return scanText(job);
   if (job.kind === 'npm') return checkDependency(job);
   if (job.kind === 'wayback') return scanWayback(job);
+  if (job.kind === 'replay') return replayRequest(job);
 }
 
 // ───────────────────────── scanners ─────────────────────────
@@ -394,9 +397,17 @@ async function scanExternal(job) {
   }
   data.hashes[hash] = url;
 
+  // change tracking: the same script (family) with new content means the app was redeployed
+  const family = job.manual ? null : scriptFamily(url);
+  const before = family ? data.families?.[family] : null;
+  if (family) (data.families ||= {})[family] = { url, hash, ts: Date.now() };
+
   const results = analyze(res.text, rulesFor(host));
-  file.count = mergeFindings(data, results, { file: url });
+  const newKeys = [];
+  file.count = mergeFindings(data, results, { file: url, newKeys });
   file.status = 'done';
+  if (before && before.hash !== hash) recordChange(data, { family, from: before.url, to: url, newKeys });
+  else if (!before && family) attachToRecentChange(data, newKeys); // new files of the same deploy
   markDirty(host);
   scheduleBadge(host);
   queueDependencyChecks(host, data, job.force);
@@ -404,6 +415,88 @@ async function scanExternal(job) {
   if (s.fetchSourceMaps || s.probeSourceMaps) handleSourceMapRef(job, res, data);
   if (s.crawlJs && (job.depth || 0) < 2) crawlReferences(job, results, data);
   discoverChunks(job, res.text, res.finalUrl || url, data);
+}
+
+// ── change alerts ──
+
+const CHANGE_WINDOW = 10 * 60 * 1000; // new files within 10 minutes of a change belong to the same deploy
+const MAX_CHANGES = 30;
+
+const shortName = (u) => {
+  try {
+    return new URL(u).pathname.split('/').filter(Boolean).pop() || u;
+  } catch {
+    return u;
+  }
+};
+
+const CHANGE_DESC =
+  'The app was redeployed: scripts were replaced by new versions. Findings that first appeared with them are marked "new"; use the New filter (or the banner) to see only them.';
+
+/**
+ * A script was replaced by a new version. Every file that changes within CHANGE_WINDOW belongs to the
+ * same deploy, so one deploy is one change entry and one Intel finding, however many chunks it touched.
+ */
+function recordChange(data, { family, from, to, newKeys }) {
+  const now = Date.now();
+  let change = data.changes?.[0];
+  if (!change || now - change.at > CHANGE_WINDOW) {
+    change = { at: now, family, from, to, files: 0, added: [] };
+    data.changes = [change, ...(data.changes || [])].slice(0, MAX_CHANGES);
+    const value = `${shortName(from)} → ${shortName(to)}`;
+    change.findingKey = 'intel|' + value;
+    mergeFindings(data, [{ rule: 'bundle-changed', label: 'Bundle changed', category: 'intel', severity: 'info', value, tags: [], line: 0, col: 0, desc: CHANGE_DESC }], { file: to });
+    scheduleChangeNotification(data.host, change);
+  }
+  change.files = (change.files || 0) + 1;
+  addToChange(data, change, newKeys);
+}
+
+/** Marks findings as new in `change` and keeps its Intel summary current. */
+function addToChange(data, change, newKeys) {
+  for (const k of newKeys) if (data.findings[k]) data.findings[k].changedAt = change.at;
+  change.added = [...new Set([...change.added, ...newKeys])].slice(0, 1000);
+  const f = data.findings[change.findingKey];
+  if (!f) return;
+  f.meta = { at: new Date(change.at).toISOString(), 'files changed': change.files, new: changeSummary(data, change) };
+  f.severity = change.added.length ? 'low' : 'info';
+}
+
+function changeSummary(data, change) {
+  const counts = {};
+  for (const k of change.added) {
+    const c = data.findings[k]?.category;
+    if (c) counts[c] = (counts[c] || 0) + 1;
+  }
+  return Object.entries(counts).map(([c, n]) => `${n} ${c}`).join(', ') || 'no new findings';
+}
+
+/** One notification per deploy, sent once the changed files have had time to be scanned. */
+function scheduleChangeNotification(host, change) {
+  if (!state.settings.notify) return;
+  setTimeout(async () => {
+    const data = await getHost(host);
+    const c = data.changes?.find((x) => x.at === change.at);
+    if (!c?.added.length) return;
+    try {
+      chrome.notifications.create('jsrecon-change-' + c.at, {
+        type: 'basic',
+        iconUrl: chrome.runtime.getURL('icons/icon128.png'),
+        title: `JS Recon: ${host} was redeployed`,
+        message: `${c.files} file${c.files === 1 ? '' : 's'} changed · new: ${changeSummary(data, c)}`,
+        priority: 1,
+      });
+    } catch {
+      /* notifications unavailable */
+    }
+  }, 20000);
+}
+
+/** A script seen for the first time shortly after a change most likely came with that deploy. */
+function attachToRecentChange(data, newKeys) {
+  const recent = data.changes?.[0];
+  if (!recent || !newKeys.length || Date.now() - recent.at > CHANGE_WINDOW) return;
+  addToChange(data, recent, newKeys);
 }
 
 async function scanText(job) {
@@ -639,6 +732,33 @@ function discoverChunks(job, code, baseUrl, data) {
     if (!scriptAllowed(u, scope, s)) continue;
     data.chunksFetched = (data.chunksFetched || 0) + 1;
     enqueue({ kind: 'external', host: job.host, origin: job.origin, id: u, url: u, pageUrl: job.pageUrl, chunk: true });
+  }
+}
+
+// ── "send to proxy" (active, only on request): GET discovered URLs so they show up in the site map of
+// an intercepting proxy (Burp, Caido, ZAP) the browser is configured to use. Same site only, no
+// placeholders, nothing that sounds like it changes state; redirects are not followed.
+
+const MAX_REPLAY = 500;
+
+async function replayToProxy({ host, urls }) {
+  await ready();
+  if (!host || !Array.isArray(urls)) return { ok: false, error: 'Nothing to send' };
+  const { urls: list, skipped } = replayCandidates(urls.slice(0, 10000).map(String), siteOf, host);
+  const send = list.slice(0, MAX_REPLAY);
+  for (const u of send) enqueue({ kind: 'replay', host, id: u, url: u });
+  return { ok: true, queued: send.length, skipped: { ...skipped, limit: list.length - send.length } };
+}
+
+async function replayRequest(job) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 20000);
+  try {
+    await fetch(job.url, { method: 'GET', credentials: 'include', cache: 'no-store', redirect: 'manual', signal: ctrl.signal });
+  } catch {
+    /* the proxy has seen it either way */
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -1232,6 +1352,7 @@ const HANDLERS = {
   'page-collect': onPageCollect,
   'runtime-collect': onRuntimeCollect,
   wayback: waybackLookup,
+  replay: replayToProxy,
   rescan,
   'scan-urls': scanUrls,
   'scan-text': scanPastedText,

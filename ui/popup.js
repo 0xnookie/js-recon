@@ -3,6 +3,8 @@ import { DEV_HOST_RE, CLOUD_HOST_RE, interestingParam } from '../src/rules.js';
 import { getSettings, saveSettings } from '../src/settings.js';
 import { sourcesZip, dumpHosts, canRebuild } from './dump.js';
 import { ZipWriter } from '../src/zip.js';
+import { buildOpenApi, buildPostman, replayCandidates } from '../src/exporters.js';
+import { parseDefinition, schemaSketch } from '../src/graphql.js';
 
 const params = new URLSearchParams(location.search);
 const FULL = params.get('view') === 'full';
@@ -55,6 +57,7 @@ const ui = {
   hideNoise: store.get('hideNoise', true),
   hideTentative: store.get('hideTentative', false),
   onlyInteresting: false,
+  onlyNew: false,
   absolute: store.get('absolute', false),
   limit: 400,
   expanded: new Set(),
@@ -156,7 +159,7 @@ const PARAM_DESC = {
 };
 
 function buildModel(data) {
-  const m = { secrets: [], api: [], endpoints: [], urls: [], domains: [], cloud: [], params: [], deps: [], intel: [], sinks: [], files: [] };
+  const m = { secrets: [], api: [], endpoints: [], urls: [], domains: [], cloud: [], params: [], deps: [], intel: [], sinks: [], files: [], graphql: [] };
   if (!data) return m;
   const pageSite = siteOf((ui.host || '').replace(/:\d+$/, ''));
   const params = new Map();
@@ -195,6 +198,11 @@ function buildModel(data) {
     if (f && d.sources.length < 5) d.sources.push(...f.sources.slice(0, 5 - d.sources.length));
   };
 
+  // findings that first appeared with the latest bundle change are "new"
+  const latestChange = data.changes?.[0]?.at;
+  for (const f of Object.values(data.findings)) {
+    if (latestChange && f.changedAt === latestChange && !f.tags?.includes('new')) f.tags = [...(f.tags || []), 'new'];
+  }
   for (const f of Object.values(data.findings)) {
     if (f.category === 'params') {
       addParam(f.value, null, f, f.meta?.kind || 'query');
@@ -288,6 +296,7 @@ function filtered(tab) {
     if (tab === 'secrets' && ui.hideTentative && f.confidence === 'tentative') return false;
     if (ui.hideNoise && NOISE_TABS.has(tab) && f.tags?.some((t) => t === 'noise' || t === 'static')) return false;
     if (ui.onlyInteresting && INTERESTING_TABS.has(tab) && !f.tags?.includes('interesting')) return false;
+    if (ui.onlyNew && tab !== 'files' && !f.tags?.includes('new')) return false;
     if (tab === 'files') return match(f.url + ' ' + (f.label || '') + ' ' + (f.error || ''));
     return match(f.value + ' ' + (f.label || '') + ' ' + (f.examples || []).join(' ') + ' ' + (f.tags || []).join(' '));
   });
@@ -354,8 +363,13 @@ function detailFor(f) {
   if (f.confidence) Object.assign(meta, { confidence: f.confidence, entropy: `${f.entropy} bits/char (Shannon)` });
   delete meta.method;
   delete meta.path;
+  delete meta.graphql;
+  const doc = meta.document;
+  delete meta.document;
+  if (f.meta?.graphql) meta.endpoint = graphqlEndpoint();
   const mb = metaBlock(meta);
   if (mb) d.append(mb);
+  if (doc) d.append(h('pre', { class: 'json mono' }, doc));
   if (/^eyJ/.test(f.value)) {
     const j = decodeJwt(f.value);
     if (j) d.append(h('pre', { class: 'json mono' }, JSON.stringify(j, null, 2)));
@@ -430,7 +444,42 @@ function curlFor(method, url) {
   return `curl -i -s -k -X ${method} ${shq(url)}${['POST', 'PUT', 'PATCH'].includes(method) ? " -H 'Content-Type: application/json' -d '{}'" : ''}`;
 }
 
+/** The GraphQL endpoint the app uses: a discovered URL / endpoint containing "graphql", else /graphql. */
+function graphqlEndpoint() {
+  const m = ui.model;
+  const cands = [...(m?.endpoints || []), ...(m?.urls || [])].map((f) => f.value).filter((v) => /graphql|\/gql(?:[/?#]|$)/i.test(v) && !v.includes('${'));
+  const own = cands.find((v) => resolveUrl(v).startsWith(ui.data?.origin || '\u0000'));
+  return resolveUrl(own || cands[0] || '/graphql');
+}
+
+const GQL_LABEL = { QUERY: 'QUERY', MUTATION: 'MUTATION', SUBSCRIPTION: 'SUB' };
+
+function graphqlRow(f) {
+  const { method } = apiParts(f);
+  const m = method.toLowerCase();
+  const curl = () => {
+    const body = JSON.stringify({ operationName: f.meta.path, query: f.meta.document || '', variables: {} });
+    return `curl -i -s -k -X POST ${shq(graphqlEndpoint())} -H 'Content-Type: application/json' --data-raw ${shq(body)}`;
+  };
+  const row = h(
+    'div',
+    { class: `row link api m-${m}` },
+    head(
+      h('span', { class: `method gql m-${m}`, title: method.toLowerCase() }, GQL_LABEL[method] || method),
+      h('span', { class: 'value mono', title: f.meta?.fields || '' }, f.meta.path),
+      f.meta?.fields ? h('span', { class: 'gql-fields mono' }, `{ ${truncate(f.meta.fields, 60)} }`) : null,
+      chips(f.tags),
+      h('span', { class: 'spacer' }),
+      srcSummary(f),
+      f.meta?.document ? btn('curl', 'Copy as curl command (POST to the GraphQL endpoint)', () => copy(curl(), 'curl command copied')) : null,
+      btn('Copy', 'Copy the operation', () => copy(f.meta?.document || f.value)),
+    ),
+  );
+  return expandable(row, f.key, () => detailFor(f));
+}
+
 function apiRow(f) {
+  if (f.meta?.graphql) return graphqlRow(f);
   const { method, path } = apiParts(f);
   const abs = resolveUrl(path);
   const shown = ui.absolute ? abs : path;
@@ -667,6 +716,38 @@ function renderToolbar() {
   $('#noiseWrap').hidden = !NOISE_TABS.has(t);
   $('#interestingWrap').hidden = !INTERESTING_TABS.has(t);
   $('#absWrap').hidden = t !== 'endpoints' && t !== 'api';
+  $('#newWrap').hidden = !ui.data?.changes?.length || t === 'files';
+}
+
+/** "Changed 2 h ago: main.4f2a.js → main.9b8c.js · 12 new" with a button for the New filter. */
+function renderChangeBanner() {
+  const el = $('#changeBanner');
+  const c = ui.data?.changes?.[0];
+  if (!c || Date.now() - c.at > 14 * 86400000) {
+    el.hidden = true;
+    return;
+  }
+  const mins = Math.round((Date.now() - c.at) / 60000);
+  const ago = mins < 60 ? `${mins} min ago` : mins < 2880 ? `${Math.round(mins / 60)} h ago` : `${Math.round(mins / 1440)} days ago`;
+  const name = (u) => {
+    try {
+      return new URL(u).pathname.split('/').pop();
+    } catch {
+      return u;
+    }
+  };
+  el.replaceChildren(
+    h('span', {}, h('b', {}, 'Bundle changed '), `${ago}: `, h('span', { class: 'mono' }, `${name(c.from)} → ${name(c.to)}`), ` · ${c.added.length} new finding${c.added.length === 1 ? '' : 's'}`),
+    h('span', { class: 'spacer' }),
+    c.added.length
+      ? btn(ui.onlyNew ? 'Show all' : 'Show new', 'Only findings that first appeared in the new version', () => {
+          ui.onlyNew = !ui.onlyNew;
+          $('#onlyNew').checked = ui.onlyNew;
+          render();
+        })
+      : null,
+  );
+  el.hidden = false;
 }
 
 function emptyState(title, text) {
@@ -677,6 +758,7 @@ function render() {
   if (!ui.model) ui.model = buildModel(ui.data);
   renderTabs();
   renderToolbar();
+  renderChangeBanner();
   const list = $('#list');
   const scroll = list.scrollTop;
   list.replaceChildren();
@@ -856,7 +938,7 @@ function textReport() {
     out.push(`## ${title} (${lines.length})`, ...lines, '');
   };
   section('Secrets', m.secrets.map((f) => `[${f.severity.toUpperCase()}${f.confidence ? '/' + f.confidence : ''}] ${f.label}: ${f.value}  (${f.sources.map(srcLabel).join(', ')})`));
-  section('API endpoints', m.api.map((f) => `${apiParts(f).method} ${resolveUrl(apiParts(f).path)}`));
+  section('API endpoints', m.api.map((f) => (f.meta?.graphql ? `${apiParts(f).method} ${apiParts(f).path} (GraphQL)` : `${apiParts(f).method} ${resolveUrl(apiParts(f).path)}`)));
   section('Endpoints', m.endpoints.filter((f) => !f.tags.includes('noise')).map((f) => f.value));
   section('URLs', m.urls.filter((f) => !f.tags.includes('noise')).map((f) => f.value));
   section('Domains', m.domains.map((d) => `${d.value}\t${d.tags.join(',')}`));
@@ -874,8 +956,87 @@ function textReport() {
 function endpointPaths() {
   return [
     ...ui.model.endpoints.filter((f) => !f.tags.some((t) => t === 'noise' || t === 'static')).map((f) => f.value),
-    ...ui.model.api.map((f) => apiParts(f).path),
+    ...ui.model.api.filter((f) => !f.meta?.graphql).map((f) => apiParts(f).path),
   ];
+}
+
+/** Model for the OpenAPI / Postman exporters (src/exporters.js). */
+function exportModel() {
+  const m = ui.model;
+  const bodyFields = {};
+  for (const p of m.params.filter((x) => x.kind === 'body')) {
+    for (const ex of p.examples) if (!(bodyFields[ex] ||= []).includes(p.value)) bodyFields[ex].push(p.value);
+  }
+  const auth = m.params.filter((p) => p.kind === 'header' && /^authorization$/i.test(p.value));
+  return {
+    host: ui.host,
+    origin: ui.data.origin,
+    endpoints: m.api.filter((f) => !f.meta?.graphql).map((f) => ({ ...apiParts(f), tags: f.tags })),
+    bodyFields,
+    headers: m.params.filter((p) => p.kind === 'header').map((p) => p.value),
+    bearer: auth.length > 0 && !auth.some((p) => p.examples.some((e) => /^basic/i.test(e))),
+    graphql: { endpoint: graphqlEndpoint(), operations: m.api.filter((f) => f.meta?.graphql && f.meta.document).map((f) => ({ kind: f.meta.method.toLowerCase(), name: f.meta.path, document: f.meta.document })) },
+  };
+}
+
+function exportGraphql() {
+  const ops = ui.model.api.filter((f) => f.meta?.graphql && f.meta.document);
+  const frags = ui.model.graphql.filter((f) => f.meta?.document);
+  if (!ops.length) return toast('No GraphQL operations found');
+  const defs = [...ops, ...frags].map((f) => parseDefinition(f.meta.document)).filter(Boolean);
+  const text = [
+    `# ${ui.host} · GraphQL endpoint: ${graphqlEndpoint()}`,
+    '',
+    schemaSketch(defs),
+    '# ─── Operations and fragments found in the client ───',
+    '',
+    ...[...ops, ...frags].map((f) => f.meta.document + '\n'),
+  ].join('\n');
+  download(`jsrecon-${safeName(ui.host)}-${stamp()}.graphql`, text);
+  toast(`${ops.length} operations, ${frags.length} fragments`);
+}
+
+/** Concrete GET URLs of this host (the background filters again before sending anything). */
+function replayUrls() {
+  const keep = (f) => !f.tags.some((t) => t === 'noise' || t === 'static' || t === 'js');
+  const urls = [
+    ...ui.model.endpoints.filter(keep).map((f) => f.value),
+    ...ui.model.urls.filter(keep).map((f) => f.value),
+    ...ui.model.api.filter((f) => !f.meta?.graphql && apiParts(f).method === 'GET').map((f) => apiParts(f).path),
+  ]
+    .map(resolveUrl)
+    .filter(isHttp);
+  return replayCandidates(urls, siteOf, ui.host);
+}
+
+let replayArmed = 0;
+const REPLAY_LABEL = 'Send GET URLs to proxy… ';
+
+/** Two clicks: the first shows how many requests would be sent, the second sends them. */
+async function runReplay() {
+  if (!ui.data) return toast('Nothing to send');
+  const { urls, skipped } = replayUrls();
+  const item = $('#replayItem');
+  if (!urls.length) {
+    $('#exportMenu').open = false;
+    return toast('No concrete GET URLs for this host');
+  }
+  if (Date.now() - replayArmed > 6000) {
+    replayArmed = Date.now();
+    item.firstChild.textContent = `Send ${urls.length} GET request${urls.length > 1 ? 's' : ''}? Click again `;
+    setTimeout(() => {
+      if (replayArmed && Date.now() - replayArmed >= 6000) item.firstChild.textContent = REPLAY_LABEL;
+    }, 6100);
+    return;
+  }
+  replayArmed = 0;
+  item.firstChild.textContent = REPLAY_LABEL;
+  $('#exportMenu').open = false;
+  const r = await chrome.runtime.sendMessage({ type: 'replay', host: ui.host, urls });
+  if (!r?.ok) return toast(r?.error || 'Failed');
+  const skip = skipped.unsafe + skipped.template;
+  toast(`Sending ${r.queued} GET requests${skip ? ` · skipped ${skip} (placeholders / state-changing)` : ''}`);
+  pollStatus();
 }
 
 const absoluteUrls = () => [...new Set(endpointPaths().map(resolveUrl).filter((u) => isHttp(u) && !u.includes('${')))].sort();
@@ -969,6 +1130,7 @@ async function runWayback() {
 }
 
 async function doExport(kind) {
+  if (kind === 'replay') return runReplay(); // keeps the menu open for the confirmation click
   $('#exportMenu').open = false;
   if (kind === 'dump') return openDump();
   if (kind === 'wayback') return runWayback();
@@ -983,7 +1145,10 @@ async function doExport(kind) {
   if (kind === 'txt') download(`${base}-${stamp()}.txt`, textReport());
   if (kind === 'urls') download(`${base}-urls-${stamp()}.txt`, absoluteUrls().join('\n'));
   if (kind === 'wordlists') await exportWordlists();
-  if (kind === 'api') download(`${base}-api-${stamp()}.txt`, ui.model.api.map((f) => `${apiParts(f).method} ${resolveUrl(apiParts(f).path)}`).join('\n'));
+  if (kind === 'graphql') exportGraphql();
+  if (kind === 'openapi') download(`${base}-openapi-${stamp()}.json`, JSON.stringify(buildOpenApi(exportModel()), null, 2), 'application/json');
+  if (kind === 'postman') download(`${base}-${stamp()}.postman_collection.json`, JSON.stringify(buildPostman(exportModel()), null, 2), 'application/json');
+  if (kind === 'api') download(`${base}-api-${stamp()}.txt`, ui.model.api.filter((f) => !f.meta?.graphql).map((f) => `${apiParts(f).method} ${resolveUrl(apiParts(f).path)}`).join('\n'));
 }
 
 function copyVisible() {
@@ -1023,6 +1188,7 @@ function bind() {
   bindCheckbox('#hideNoise', 'hideNoise');
   bindCheckbox('#hideTentative', 'hideTentative');
   bindCheckbox('#onlyInteresting', 'onlyInteresting', false);
+  bindCheckbox('#onlyNew', 'onlyNew', false);
   bindCheckbox('#absolute', 'absolute');
   $('#btnCopy').addEventListener('click', copyVisible);
 

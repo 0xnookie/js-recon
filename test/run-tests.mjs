@@ -158,7 +158,7 @@ expect('redirect_uri', 'param-read');
 expect('returnTo', 'param-string');
 expect('security@acme.io', 'email');
 expect('192.168.1.20', 'ip', 'low');
-expect('query GetUserProfile', 'graphql-op');
+expect('QUERY GetUserProfile', 'graphql-op');
 check(find((f) => f.rule === 'postmessage-listener'), 'postMessage listener');
 check(find((f) => f.rule === 'postmessage-wildcard'), 'postMessage "*"');
 check(find((f) => f.rule === 'dev-comment' && /TODO: remove hardcoded/.test(f.value)), 'TODO comment');
@@ -396,6 +396,74 @@ console.log('\nWayback capture order');
   check(order.slice(0, 4).filter((u) => u.startsWith('/chart/')).length === 1, 'one copy per script family before older versions');
   check(order.at(-1) === '/js/jquery.min.js', 'well-known libraries last');
   check(order.length === 8, 'malformed rows dropped');
+}
+
+console.log('\nGraphQL');
+{
+  const { parseDefinition, schemaSketch } = await import('../src/graphql.js');
+  const tick = '`';
+  const code = [
+    `const USER = gql${tick}fragment UserFields on User { id email isAdmin createdAt team { id name } }${tick};`,
+    `const Q = gql${tick}query GetUser($id: ID!) { user(id: $id) { ...UserFields orders(first: 10) { totalCount } } } \${USER}${tick};`,
+    'var doc={kind:"Document",loc:{start:0,end:120,source:{body:"mutation UpdateUserRole($userId: ID!, $role: Role!) {\\n  updateUserRole(userId: $userId, role: $role) {\\n    user { id role }\\n    errors { message }\\n  }\\n}\\n"}}};',
+    'const relay = {params:{operationKind:"subscription",name:"onMessage",text:"subscription OnMessage($room: String!) {\\n  messageAdded(room: $room) { id author { ... on Admin { level } ... on Customer { tier } } }\\n}"}};',
+    'const notGql = "query string(a) {"; function query(x){ return x } var subscription = foo; const q = { query: "x" };',
+  ].join('\n');
+  const res = analyze(code, rules);
+  const ops = res.filter((f) => f.rule === 'graphql-op');
+  const get = (v) => ops.find((f) => f.value === v);
+  check(ops.length === 3, `3 operations (${ops.map((f) => f.value).join(', ')}), JS look-alikes ignored`);
+  check(get('QUERY GetUser')?.meta.variables === '$id: ID!' && get('QUERY GetUser').meta.fields === 'user', 'gql template: variables and root fields');
+  const mut = get('MUTATION UpdateUserRole');
+  check(mut?.category === 'api' && mut.tags.includes('write') && mut.tags.includes('interesting') && /updateUserRole\(userId: \$userId/.test(mut.meta.document), 'Apollo JSON-escaped document → MUTATION, write + interesting, document unescaped');
+  check(get('SUBSCRIPTION OnMessage')?.meta.fields === 'messageAdded', 'Relay text → SUBSCRIPTION');
+  const frag = res.find((f) => f.rule === 'graphql-fragment');
+  check(frag?.category === 'graphql' && frag.value === 'fragment UserFields on User', 'fragment (feeds the schema sketch)');
+  const sdl = schemaSketch([...ops, frag].map((f) => parseDefinition(f.meta.document)));
+  check(/type Query \{\n {2}user\(id: ID!\): User\n\}/.test(sdl), 'schema: Query.user(id: ID!): User (type from the fragment)');
+  check(/updateUserRole\(userId: ID!, role: Role!\): UpdateUserRole/.test(sdl), 'schema: mutation arguments typed from the variables');
+  check(/type User \{[^}]*email: String[^}]*isAdmin: Boolean[^}]*orders\(first: Int\): Orders[^}]*role: String/s.test(sdl), 'schema: object fields merged from fragment and operations, scalars guessed');
+  check(/union Author = Admin \| Customer/.test(sdl) && /message: String/.test(sdl), 'schema: union from inline fragments; "message" is not an Int');
+  check(/#\s+Role/.test(sdl), 'schema: input / enum types listed');
+}
+
+console.log('\nOpenAPI / Postman exports');
+{
+  const { buildOpenApi, buildPostman, splitEndpoint, replayCandidates } = await import('../src/exporters.js');
+  const { siteOf } = await import('../src/util.js');
+  check(JSON.stringify(splitEndpoint('${API_BASE}/v1/users/:id?fields=&page=', 'https://app.acme.test')) === JSON.stringify({ origin: 'https://app.acme.test', path: '/v1/users/{id}', query: ['fields', 'page'], templated: true }), 'splitEndpoint: base variable, :id, query names');
+  check(splitEndpoint('https://api.acme.test/v2/orders/${orderId}/refund', 'https://app.acme.test').path === '/v2/orders/{orderId}/refund', 'splitEndpoint: ${x} becomes {x}, other origin kept');
+  const model = {
+    host: 'app.acme.test',
+    origin: 'https://app.acme.test',
+    endpoints: [
+      { method: 'GET', path: '/api/v1/users/{id}?fields=', tags: ['observed'] },
+      { method: 'POST', path: '/api/v1/users/{id}/role', tags: ['write', 'interesting'] },
+      { method: 'GET', path: 'https://api.acme.test/v2/me', tags: [] },
+    ],
+    bodyFields: { 'POST /api/v1/users/{id}/role': ['role', 'isAdmin'] },
+    headers: ['X-Tenant-Id', 'Authorization'],
+    bearer: true,
+    graphql: { endpoint: 'https://app.acme.test/graphql', operations: [{ kind: 'query', name: 'GetUser', document: 'query GetUser { me { id } }' }] },
+  };
+  const oa = buildOpenApi(model);
+  const getUser = oa.paths['/api/v1/users/{id}']?.get;
+  check(oa.openapi === '3.0.3' && getUser && getUser.parameters.some((p) => p.in === 'path' && p.name === 'id' && p.required) && getUser.parameters.some((p) => p.in === 'query' && p.name === 'fields'), 'OpenAPI: path and query parameters');
+  check(Object.keys(oa.paths['/api/v1/users/{id}/role'].post.requestBody.content['application/json'].schema.properties).join() === 'role,isAdmin', 'OpenAPI: request body from runtime-captured fields');
+  check(oa.paths['/v2/me']?.servers?.[0].url === 'https://api.acme.test', 'OpenAPI: other origin as a path-level server');
+  check(oa.components.parameters.header_X_Tenant_Id && oa.security?.[0].bearerAuth, 'OpenAPI: custom headers and bearer auth');
+  check(oa.paths['/graphql']?.post.requestBody.content['application/json'].examples.query_GetUser.value.query === 'query GetUser { me { id } }', 'OpenAPI: GraphQL operations as request examples');
+  const pm = buildPostman(model);
+  const role = pm.item.find((i) => i.name === 'POST /api/v1/users/{id}/role');
+  check(pm.info.schema.includes('v2.1.0') && role?.request.url.raw === '{{baseUrl}}/api/v1/users/:id/role' && JSON.parse(role.request.body.raw).isAdmin === '', 'Postman: :id path variable, {{baseUrl}}, JSON body');
+  check(pm.item.find((i) => i.name === 'GraphQL')?.item[0].request.body.mode === 'graphql' && pm.auth?.type === 'bearer', 'Postman: GraphQL folder and bearer auth');
+  const r = replayCandidates(
+    ['https://app.acme.test/api/v1/reports', 'https://app.acme.test/logout', 'https://app.acme.test/api/users/{id}', 'https://evil.example/x', 'https://cdn.acme.test/api/v1/config?x=1', 'https://app.acme.test/api/v1/reports'],
+    siteOf,
+    'app.acme.test',
+  );
+  check(JSON.stringify(r.urls) === JSON.stringify(['https://app.acme.test/api/v1/reports', 'https://cdn.acme.test/api/v1/config?x=1']) && r.skipped.unsafe === 1 && r.skipped.template === 1 && r.skipped.offsite === 1,
+    'send to proxy: same site only, no placeholders, nothing that sounds state-changing, de-duplicated');
 }
 
 console.log('\nclassifyLink');

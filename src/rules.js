@@ -12,6 +12,7 @@
 // scans of multi-megabyte bundles linear.
 
 import { entropy, decodeJwt, SEV_RANK } from './util.js';
+import { graphqlAt } from './graphql.js';
 
 export const CATEGORY_LABELS = {
   secrets: 'Secrets',
@@ -513,6 +514,35 @@ function featureFlags(v, m) {
   };
 }
 
+// ── GraphQL ──
+
+const GQL_SENSITIVE_RE =
+  /admin|impersonat|delete|remove|destroy|purge|role|permission|privilege|grant|revoke|token|secret|password|passwd|credential|apikey|api_key|internal|debug|export|import|upload|invite|transfer|refund|payment|billing|wallet|withdraw|user|account|tenant/i;
+
+/** An operation header in code → API finding "QUERY GetUser" with its document, variables and root fields. */
+function graphqlOperation(v, m, ctx) {
+  const g = graphqlAt(ctx.code, ctx.index);
+  if (!g || g.def.kind === 'fragment') return null;
+  const { def, document } = g;
+  const method = def.kind.toUpperCase();
+  const fields = def.selections.filter((s) => s.name).map((s) => s.name);
+  const tags = [];
+  if (def.kind === 'mutation') tags.push('write');
+  if (GQL_SENSITIVE_RE.test(def.name) || fields.some((f) => GQL_SENSITIVE_RE.test(f))) tags.push('interesting');
+  return {
+    value: `${method} ${def.name}`,
+    tags,
+    meta: {
+      method,
+      path: def.name,
+      graphql: true,
+      fields: fields.join(', '),
+      variables: def.variables.map((x) => `$${x.name}: ${x.type}`).join(', ') || undefined,
+      document: document.slice(0, 8000),
+    },
+  };
+}
+
 // ── postMessage handlers ──
 
 export const POSTMESSAGE_DESC =
@@ -807,8 +837,15 @@ export const RULES = [
     /(?<![\w.])(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?![\w.])/g, { post: classifyIp }),
   rule('email', 'Email Address', I, 'info', /\b[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63}){0,6}\.[A-Za-z]{2,24}\b/g,
     { post: classifyEmail }),
-  rule('graphql-op', 'GraphQL Operation', I, 'info', /\b(query|mutation|subscription)\s+([A-Za-z_]\w{1,80})\s*[({]/g,
-    { post: (v, m) => ({ value: `${m[1]} ${m[2]}` }) }),
+  // GraphQL: full operation documents (gql`…`, Apollo / Relay JSON strings) → API rows QUERY / MUTATION / SUBSCRIPTION
+  rule('graphql-op', 'GraphQL operation', A, 'info', /\b(query|mutation|subscription)\s+([A-Za-z_]\w{0,100})\s*(?=[({@])/g, { post: graphqlOperation }),
+  // fragments only feed the schema sketch (hidden "graphql" category)
+  rule('graphql-fragment', 'GraphQL fragment', 'graphql', 'info', /\bfragment\s+([A-Za-z_]\w{0,100})\s+on\s+([A-Za-z_]\w{0,100})\s*(?=[{@])/g, {
+    post: (v, m, ctx) => {
+      const g = graphqlAt(ctx.code, ctx.index);
+      return g?.def.kind === 'fragment' ? { value: `fragment ${g.def.name} on ${g.def.on}`, meta: { document: g.document.slice(0, 8000) } } : null;
+    },
+  }),
   rule('dev-comment', 'Developer Comment', I, 'info',
     /(?:\/\/|\/\*+|<!--)[ \t]*(?:TODO|FIXME|HACK|XXX|BUG|SECURITY|TEMP|DEPRECATED)\b[^\n]{0,160}/g,
     { post: (v) => ({ value: v.replace(/\s*(?:\*\/|-->)[\s\S]*$/, '').trim() }) }),

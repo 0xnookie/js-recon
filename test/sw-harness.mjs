@@ -350,6 +350,13 @@ check(d8.findings['api|DELETE /api/internal/tenants/all'], 'endpoint from the ar
 const archMap = d8.files['https://web.archive.org/web/20230105120000id_/https://app.acme.test/static/js/admin-old.js.map'];
 check(archMap?.kind === 'sourcemap' && /archived/.test(archMap.label) && d8.findings['api|POST /api/internal/purge'], 'its archived source map followed and scanned');
 
+console.log('\nSend to proxy');
+const beforeReplay = fetched.length;
+const rp = await send({ type: 'replay', host: 'app.acme.test', urls: ['https://app.acme.test/api/v1/reports', 'https://app.acme.test/logout', 'https://app.acme.test/api/users/{id}', 'https://evil.example/x'] });
+await drain();
+const replayed = fetched.slice(beforeReplay);
+check(rp?.ok && rp.queued === 1 && JSON.stringify(replayed) === JSON.stringify(['https://app.acme.test/api/v1/reports']), `only the concrete, harmless same-site GET sent (${replayed.join(', ')})`);
+
 const cdxBackup = FILES.cdx;
 FILES.cdx = { ...cdxBackup, status: 503, body: '<html>Internet Archive: Temporarily Offline</html>', type: 'text/html' };
 const wbDown = await send({ type: 'wayback', host: 'app.acme.test' });
@@ -411,6 +418,30 @@ console.log('\nManual scan');
 await send({ type: 'scan-text', host: 'manual', text: `const t = "${fakeStripe}";` });
 await drain();
 check(Object.values(mem['host:manual']?.findings || {}).some((f) => f.value === fakeStripe), 'pasted code scanned into "manual"');
+
+// on a freshly cleared host, so earlier fixtures can't look like an older version of these scripts
+console.log('\nChange alerts');
+FILES['https://app.acme.test/static/js/main.1111aaaa.js'] = { body: 'fetch("/api/v1/profile");var a="/api/v1/settings";' };
+FILES['https://app.acme.test/static/js/main.2222bbbb.js'] = { body: 'fetch("/api/v1/profile");var a="/api/v1/settings";axios.post("/api/v2/admin/export",d);' };
+FILES['https://app.acme.test/static/js/vendor.4444dddd.js'] = { body: 'var v="/api/v1/health";' };
+FILES['https://app.acme.test/static/js/vendor.5555eeee.js'] = { body: 'var v="/api/v1/health";var w="/api/v1/metrics";' };
+FILES['https://app.acme.test/static/js/new-feature.3333cccc.chunk.js'] = { body: 'var p="/api/v2/beta/feature-x";' };
+fire('https://app.acme.test/static/js/main.1111aaaa.js');
+fire('https://app.acme.test/static/js/vendor.4444dddd.js');
+await drain();
+check(!mem['host:app.acme.test'].changes?.length, 'first version: no change recorded');
+fire('https://app.acme.test/static/js/main.2222bbbb.js');
+await drain();
+fire('https://app.acme.test/static/js/vendor.5555eeee.js');
+fire('https://app.acme.test/static/js/new-feature.3333cccc.chunk.js');
+await drain();
+const d9 = mem['host:app.acme.test'];
+const ch = d9.changes?.[0];
+check(ch && ch.from.endsWith('main.1111aaaa.js') && ch.to.endsWith('main.2222bbbb.js'), `deploy detected (${ch?.from?.split('/').pop()} → ${ch?.to?.split('/').pop()})`);
+check(d9.findings['api|POST /api/v2/admin/export']?.changedAt === ch?.at && d9.findings['endpoints|/api/v1/profile']?.changedAt === undefined, 'only what is new in the new version is marked new');
+check(d9.findings['endpoints|/api/v2/beta/feature-x']?.changedAt === ch?.at && d9.findings['endpoints|/api/v1/metrics']?.changedAt === ch?.at, 'other changed and new files of the same deploy attached to it');
+const chf = d9.findings['intel|main.1111aaaa.js → main.2222bbbb.js'];
+check(d9.changes.length === 1 && chf?.rule === 'bundle-changed' && chf.meta['files changed'] === 2, `one change and one Intel finding per deploy (${chf?.meta?.['files changed']} files, new: ${chf?.meta?.new})`);
 
 console.log(failures ? `\n${failures} check(s) failed` : '\nAll checks passed');
 process.exit(failures ? 1 : 0);

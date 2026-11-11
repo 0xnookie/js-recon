@@ -783,10 +783,32 @@ body.full .host-select {
 
 .banner::before {
   content: '';
+  flex: none;
   width: 6px;
   height: 6px;
   border-radius: 50%;
   background: var(--medium);
+}
+
+/* the app was redeployed: what changed, and a button for the New filter */
+.banner.change {
+  padding-right: 10px;
+}
+
+.banner.change::before {
+  background: var(--cyan);
+}
+
+.banner.change > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.banner.change .mono {
+  font-size: 11.5px;
+  color: var(--text);
 }
 
 /* ── panels (manual scan, dump) ── */
@@ -1349,6 +1371,34 @@ a.value {
   --m: var(--m-options);
 }
 
+/* GraphQL operations: the GraphQL brand pink family */
+.m-query {
+  --m: #e10098;
+}
+
+.m-mutation {
+  --m: #c026d3;
+}
+
+.m-subscription {
+  --m: #7c3aed;
+}
+
+.method.gql {
+  font-size: 9.5px;
+  letter-spacing: 0.01em;
+}
+
+.gql-fields {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 11px;
+  color: var(--muted);
+}
+
 /* API rows get a light tint of their method colour, like Swagger's operation blocks */
 .row.api {
   background: color-mix(in srgb, var(--m) 5%, var(--surface));
@@ -1402,7 +1452,8 @@ a.value {
   --c: var(--blue);
 }
 
-.chip.cloud {
+.chip.cloud,
+.chip.new {
   --c: var(--cyan);
 }
 

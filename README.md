@@ -8,7 +8,7 @@ JS Recon
 
 ### Passive JavaScript Recon for Bug Bounty & Pentests
 
-**A Chrome / Edge extension that mines every script, inline config, iframe, source map, lazy-loaded chunk, request and response header of the sites you browse, plus their archived JS on the Wayback Machine, for secrets, API endpoints with their HTTP method, hidden parameters, postMessage handlers, subdomains, cloud assets and dependency-confusion candidates. Everything runs locally in your browser.**
+**A Chrome / Edge extension that mines every script, inline config, iframe, source map, lazy-loaded chunk, request and response header of the sites you browse, plus their archived JS on the Wayback Machine, for secrets, API endpoints with their HTTP method, GraphQL operations, hidden parameters, postMessage handlers, subdomains, cloud assets and dependency-confusion candidates, and tells you what changed when the app is redeployed. Everything runs locally in your browser.**
 
 🎯 [What is it](#-what-is-js-recon) • ✨ [Features](#-features) • 🖥️ [Screenshots](#️-screenshots) • 🏗️ [How it works](#️-how-it-works) • 🚀 [Install](#-install) • 🕹️ [Usage](#️-usage) • ⚙️ [Settings](#️-settings--network-activity) • 🧪 [Tests](#-tests) • 🛡️ [Safety](#️-safety--authorization)
 
@@ -21,7 +21,7 @@ JS Recon
 [![Bundlers](https://img.shields.io/badge/Lazy%20chunks-webpack%20%7C%20Next.js%20%7C%20Vite%20%7C%20ESM-8A2BE2)]()
 [![Dependencies](https://img.shields.io/badge/Runtime%20deps-0-brightgreen)]()
 [![Build](https://img.shields.io/badge/Build%20step-none-lightgrey)]()
-[![Version](https://img.shields.io/badge/Version-1.1.0-orange)]()
+[![Version](https://img.shields.io/badge/Version-1.2.0-orange)]()
 [![PRs](https://img.shields.io/badge/PRs-welcome-brightgreen)]()
 
 </div>
@@ -37,6 +37,8 @@ Modern web apps ship their attack surface to the browser: API routes, feature fl
 - **Finds what minifiers hide.** Parameter names read through `l=new URLSearchParams(location.search); l.get(…)`, names declared in config (`initial_message_url_param: "initial-message"`), `data-*` attributes, cookies, storage keys and custom headers.
 - **Confirms it at runtime.** The API calls the page really makes (method, path, parameter and header names) are recorded from the browser's own traffic. Opt-in runtime hooks add the names the code reads at runtime, request body fields and every postMessage handler.
 - **Looks back in time.** Old bundles and source maps from the Wayback Machine often still contain endpoints that have since been removed from the live app.
+- **Tells you what changed.** When a site is redeployed, the endpoints, parameters and chunks that came with the new version are marked *new*. New code is the least tested code.
+- **Hands it to your proxy.** OpenAPI and Postman exports for Burp, Caido, ZAP and Postman, a GraphQL schema sketch, wordlists, and an opt-in "send GET URLs to proxy" that fills the site map.
 - **Signal over noise.** Entropy-based confidence on secrets, *interesting* tags on admin / debug / redirect-style names, library noise tagged and hideable.
 - **Private.** Findings are stored in `chrome.storage` on your machine and never sent anywhere.
 
@@ -47,16 +49,20 @@ Modern web apps ship their attack surface to the browser: API routes, feature fl
 | Tab | What you get |
 |---|---|
 | **Secrets** | 68 secret rules: provider-specific keys (AWS, GCP, Azure, GitHub, GitLab, Slack, Stripe, OpenAI, Anthropic, Twilio, SendGrid …), private keys, JWTs (decoded), DB connection strings, credentials in URLs, hard-coded Bearer / Basic auth and a context-based `key = "value"` rule. Each secret gets a **Shannon-entropy confidence**: `certain` / `firm` / `tentative`. |
-| **API** | Endpoints **with their HTTP method**, coloured like Swagger UI: `axios.post()`, `http.get<T>()`, `fetch(url, { method })`, `new Request`, `xhr.open("PUT", …)`, `$.ajax({ type, url })`, `axios({ method, url })`, wrapper functions, `` `${base}/path` `` and `BASE + "/path"`. Plus the calls the page **really makes**, tagged *observed*, with IDs normalised (`/users/{id}`). Every row has *curl* and *Copy*. |
+| **API** | Endpoints **with their HTTP method**, coloured like Swagger UI: `axios.post()`, `http.get<T>()`, `fetch(url, { method })`, `new Request`, `xhr.open("PUT", …)`, `$.ajax({ type, url })`, `axios({ method, url })`, wrapper functions, `` `${base}/path` `` and `BASE + "/path"`. Plus the calls the page **really makes**, tagged *observed*, with IDs normalised (`/users/{id}`). **GraphQL operations** (`gql` templates, Apollo / Relay documents) appear as QUERY / MUTATION / SUBSCRIPTION rows with their variables, root fields and full document. Every row has *curl* and *Copy*. |
 | **Endpoints / URLs** | LinkFinder-style extraction with template literals, scheme-less `host.tld/path` strings and Next.js routes. Tagged *interesting* (admin, debug, upload, token, graphql …), *static* or *noise*. |
 | **Domains** | Subdomains of the target found anywhere in the code, plus every host from the **Content-Security-Policy** and trusted **CORS** origins. Tagged *same site*, *third party*, *cloud*, *interesting* (dev, staging, internal, jenkins …). |
 | **Cloud** | AWS (S3, API Gateway, Lambda URLs, AppSync, RDS, ELB, CloudFront, Cognito, ARNs), Azure, Google Cloud / Firebase, DigitalOcean, Oracle, Alibaba, Rackspace, DreamHost, Cloudflare R2, Wasabi, Backblaze, Linode, IBM COS, Supabase and PaaS hosts. |
 | **Params** | Every client-side input, grouped: **query parameters** (also through minified `URLSearchParams` variables, router `query.x`, `getParameterByName()`, `/[?&]token=/` regexes and names declared in config), **request body fields** (runtime), **`data-*` attributes**, **form fields** (hidden ones tagged), **request headers** (incl. `Access-Control-Allow-Headers` and observed custom headers), **cookies** (incl. `Set-Cookie`, session cookies without `HttpOnly` flagged) and **localStorage / sessionStorage keys**. Names confirmed in real traffic or at runtime are tagged *observed* / *runtime*. |
 | **Deps** | **Dependency confusion**: package names from source maps, `node_modules/…` paths, imports and embedded `package.json` are checked against `registry.npmjs.org`. Missing packages and unclaimed scopes are **critical**. |
-| **Intel** | Injected config objects (`window.APP_CONFIG = {…}` with their keys), switched-off **feature flags**, weak CSP (`'unsafe-inline'`, `'unsafe-eval'`, JSONP / user-content hosts), CORS `null` origin and write methods, server / framework **version banners**, platform fingerprints (Cloudflare, CloudFront, Vercel …), unusual custom response headers, lazy-chunk lists, exposed source maps, emails, internal IPs, GraphQL operations, developer comments. **postMessage handlers** with their origin check (none / weak substring / regex / strict), the message types they accept and the sinks the data reaches (HTML, code, navigation, storage, requests, replies to `"*"`). |
+| **Intel** | Injected config objects (`window.APP_CONFIG = {…}` with their keys), switched-off **feature flags**, weak CSP (`'unsafe-inline'`, `'unsafe-eval'`, JSONP / user-content hosts), CORS `null` origin and write methods, server / framework **version banners**, platform fingerprints (Cloudflare, CloudFront, Vercel …), unusual custom response headers, lazy-chunk lists, exposed source maps, **bundle changes** (redeploys, with what's new), emails, internal IPs, developer comments. **postMessage handlers** with their origin check (none / weak substring / regex / strict), the message types they accept and the sinks the data reaches (HTML, code, navigation, storage, requests, replies to `"*"`). |
 | **Files** | Every scanned source (scripts, lazy chunks, inline scripts, iframes, DOM, source maps, response headers, observed traffic, runtime hooks, archived files from the Wayback Machine), with size, hits, errors and a **Sources .zip** button that rebuilds the original source tree from a map. |
 
 **Also:**
+- **Change alerts**: a banner when the app was redeployed (`main.3b8e0d1.js → main.4f2a91c.js · 11 new findings`), a *new* tag and a **New** filter on every tab, and a desktop notification if enabled. All files that change in one deploy count as one change.
+- **GraphQL schema sketch**: types, root fields with argument types, unions / interfaces and input types inferred from the operations and fragments in the client, exported as `.graphql` together with every operation.
+- **OpenAPI 3 / Postman v2.1 exports**: methods, path and query parameters, request bodies from the runtime hooks, custom headers, bearer auth and GraphQL operations. For Burp (API scan, or the OpenAPI Parser extension in Community), Caido (ReDocs plugin), ZAP, Postman and Insomnia.
+- **Send GET URLs to proxy** (active, two clicks): requests each concrete, harmless-looking same-site GET URL once, so it lands in the site map of the proxy your browser uses.
 - **Wordlists** per input kind (params, body fields, headers, cookies, storage keys, paths, path segments, URLs, subdomains), ready for ffuf, Arjun, x8 and Param Miner.
 - **Historical JS from the Wayback Machine**: one archived file per distinct script first, sensitive names and source maps first, libraries last.
 - A **static-file dumper** that zips every JS file, `.map` file and reconstructed source tree of one or more hosts for grep, semgrep or trufflehog.
@@ -69,7 +75,7 @@ Modern web apps ship their attack surface to the browser: API routes, feature fl
 <table>
   <tr>
     <td width="50%"><img src="assets/screenshots/popup-secrets.png" alt="Secrets" width="100%" /><br/><sub><b>Secrets</b>: severity-coded, entropy confidence, source location</sub></td>
-    <td width="50%"><img src="assets/screenshots/popup-api.png" alt="API endpoints" width="100%" /><br/><sub><b>API</b>: endpoints with their HTTP method, Swagger colours, one-click curl</sub></td>
+    <td width="50%"><img src="assets/screenshots/popup-api.png" alt="API endpoints" width="100%" /><br/><sub><b>API</b>: HTTP methods in Swagger colours, GraphQL operations, what's new since the last deploy, one-click curl</sub></td>
   </tr>
 </table>
 
@@ -197,8 +203,12 @@ No build step and no runtime dependencies. Chrome / Edge 116+; the styled drop-d
   | Endpoints + API as URLs | absolute URLs for ffuf, httpx, nuclei |
   | API endpoints | `METHOD URL` per line |
   | **Wordlists** | ZIP: `params.txt`, `query-params.txt`, `body-fields.txt`, `form-fields.txt`, `data-attributes.txt`, `headers.txt`, `cookies.txt`, `storage-keys.txt`, `paths.txt`, `path-segments.txt`, `urls.txt`, `subdomains.txt` and a README with ffuf / Arjun / x8 / Param Miner commands |
+  | **GraphQL schema + operations** | `.graphql`: the inferred schema sketch, then every operation and fragment |
+  | **OpenAPI 3** | `.json` for Burp (Professional API scan, or the OpenAPI Parser extension in Community), Caido (ReDocs plugin), ZAP, Insomnia |
+  | **Postman collection** | v2.1 `.json` for Postman, Insomnia and Caido (ReDocs plugin); `{{baseUrl}}`, `:id` path variables, JSON bodies, a GraphQL folder |
+  | Send GET URLs to proxy | not a file: requests each concrete same-site GET URL once (active, see below) |
   | Dump static files | ZIP of JS files, `.map` files and rebuilt source trees |
-  | Historical JS (Wayback) | not an export: fetches and scans archived JS / maps of the host |
+  | Historical JS (Wayback) | not a file: fetches and scans archived JS / maps of the host |
 
 - **Custom rules** (Settings): one per line as `Name | critical/high/medium/low/info | /regex/flags`; group 1 becomes the value.
 
@@ -218,6 +228,7 @@ Everything below runs locally. This is all the traffic the extension itself crea
 | Wayback Machine for new hosts | **off** (button: on demand) | sends the **host name** to `web.archive.org` and fetches archived files from there, never from the target |
 | Guess source-map locations | **off** | requests `file.js.map`, then `file.map` |
 | Crawl referenced JS | **off** | requests same-site `.js` URLs found in code |
+| Send GET URLs to proxy | manual, two clicks (Export menu) | one GET per concrete same-site URL, max 500, with your cookies; skips URLs with placeholders and anything that sounds state-changing (logout, delete, reset, revoke …); redirects are not followed |
 
 **Scope:** scan all sites or an allow-list, never scan a deny-list, ignore analytics / ad / consent scripts (editable), optionally first-party scripts only. Iframes follow the same filters as scripts. Every rule can be switched off individually.
 
@@ -226,9 +237,10 @@ Everything below runs locally. This is all the traffic the extension itself crea
 ## 🧪 Tests
 
 ```bash
-node test/run-tests.mjs        # rules, inputs, headers, lazy chunks, postMessage, observed requests, Wayback order, ZIP, 6 MB perf check
-node test/sw-harness.mjs       # service worker end to end with mocked chrome.*, fetch, npm and archive.org:
-                               # iframes, chunks, headers, observed traffic, runtime hooks, Wayback, dumper
+node test/run-tests.mjs        # rules, inputs, headers, lazy chunks, postMessage, observed requests, GraphQL + schema,
+                               # OpenAPI / Postman, Wayback order, ZIP, 6 MB perf check
+node test/sw-harness.mjs       # service worker end to end with mocked chrome.*, fetch, npm and archive.org: iframes, chunks,
+                               # headers, observed traffic, runtime hooks, Wayback, change alerts, send to proxy, dumper
 node test/fp-sweep.mjs <dir>   # scan a directory of real JS and list secret hits (false-positive check)
 ```
 
@@ -243,7 +255,9 @@ src/analyzer.js     pure scanning engine (no chrome.*, testable in Node)
 src/rules.js        rules, link / API / input classification, postMessage analysis, dependency extraction, custom rules
 src/chunks.js       lazy-chunk discovery (webpack chunk-map evaluator, Next.js, Vite, ESM)
 src/headers.js      response-header analysis (CORS, CSP, cookies, banners, custom headers)
-src/requests.js     observed requests (path normalisation, parameter / header names), Wayback capture order
+src/requests.js     observed requests (path normalisation, parameter / header names), script families, Wayback order
+src/graphql.js      GraphQL document extraction, parser and schema sketch
+src/exporters.js    OpenAPI 3 and Postman v2.1 builders, "send to proxy" URL filter
 src/runtime.js      opt-in hooks that run in the page's own world
 src/sourcemap.js    source-map parsing shared by worker and UI
 src/zip.js          small ZIP writer (deflate via CompressionStream)
@@ -270,9 +284,12 @@ test/               Node tests
 - ✅ **postMessage analysis**: origin check, message types and sinks per handler
 - ✅ **Wordlist exports** per input kind for ffuf, Arjun, x8 and Param Miner
 - ✅ **Historical JS**: archived bundles and source maps from the Wayback Machine
-- ⬜ **Change alerts**: flag new endpoints, parameters and chunks when a host's bundle changes
-- ⬜ **GraphQL**: rebuild the schema from the operations, fragments and types found in the bundle
-- ⬜ **Burp / Caido export**: send endpoints with their methods and parameters to the proxy's site map
+- ✅ **Change alerts**: redeploys detected per script family, new findings tagged and filterable, one notification per deploy
+- ✅ **GraphQL**: operations as API rows, schema sketch from operations and fragments
+- ✅ **Proxy exports**: OpenAPI 3 and Postman v2.1 (Burp, Caido, ZAP), "send GET URLs to proxy"
+- ⬜ **Diff view**: side-by-side list of what each recorded deploy added, with the old and new bundle
+- ⬜ **Secret validation (opt-in)**: check whether found keys are live against the provider's read-only endpoints
+- ⬜ **Team sync**: share a host's findings as a single file that another JS Recon instance can import
 
 ---
 
@@ -282,6 +299,7 @@ JS Recon is for **authorized** security testing only: pentest engagements, bug-b
 
 - ✅ Passive by default; active options (source-map guessing, crawling) are off and labelled
 - ✅ Runtime hooks and automatic Wayback lookups are opt-in; hooks only run on in-scope hosts
+- ✅ "Send GET URLs to proxy" needs two clicks, stays on the target's own site and skips anything that sounds state-changing
 - ✅ Only names are recorded from real traffic and at runtime, never values (Authorization: scheme only)
 - ✅ Scope allow-list / deny-list and per-rule switches
 - ✅ Findings stay in your browser; nothing is uploaded
