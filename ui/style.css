@@ -1430,7 +1430,8 @@ a.value {
 .chip.error,
 .chip.not-on-npm,
 .chip.scope-unclaimed,
-.chip.unpublished {
+.chip.unpublished,
+.chip.tainted {
   --c: var(--critical);
 }
 

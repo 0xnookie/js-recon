@@ -649,7 +649,7 @@ const EMPTY = {
   params: 'No parameters found.',
   deps: 'No npm dependencies found. They are extracted from source maps, node_modules paths, imports and package.json blobs.',
   intel: 'Nothing here yet.',
-  sinks: 'No DOM sinks — enable the sink rules in Settings.',
+  sinks: 'No tainted DOM sinks found. Taint flows (a URL source reaching innerHTML / eval / navigation) run by default; the broader single-pattern sink rules can be enabled in Settings.',
   routes: 'No client-side routes found (React Router, Vue Router, Angular …).',
   files: 'No files scanned yet.',
 };
@@ -706,7 +706,7 @@ function renderTabs() {
     const n = items.length;
     if (t.optional && !n && ui.tab !== t.id) continue;
     let cls = n ? 'count' : 'count zero';
-    if (t.id === 'secrets' || t.id === 'deps' || t.id === 'cloud') {
+    if (t.id === 'secrets' || t.id === 'deps' || t.id === 'cloud' || t.id === 'sinks') {
       if (items.some((f) => f.severity === 'critical')) cls += ' crit';
       else if (items.some((f) => f.severity === 'high')) cls += ' hot';
       else if (items.some((f) => f.severity === 'medium')) cls += ' warm';

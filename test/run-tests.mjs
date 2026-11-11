@@ -531,6 +531,30 @@ check(routeByVal('/users/:id')?.meta?.component === 'User', 'route component cap
 check(!routeVals.includes('/etc/passwd') && !routeVals.some((v) => v.startsWith('M12')) && !routeVals.includes('assets/logo.svg'),
   `no route false positives (got: ${routeVals.join(', ')})`);
 
+console.log('\nDOM-XSS taint flows');
+const taintPos = `
+  el.innerHTML = "<b>" + location.hash.slice(1) + "</b>";
+  node.insertAdjacentHTML("beforeend", document.referrer);
+  document.write(decodeURIComponent(location.search));
+  eval(new URLSearchParams(location.search).get("cb"));
+  window.location = location.hash;
+  frame.setAttribute("src", location.href);
+  iframe.srcdoc = window.name;
+  const x = <div dangerouslySetInnerHTML={{ __html: location.search }} />;`;
+const taintNeg = `
+  el.innerHTML = "<b>" + user.name + "</b>";
+  el.textContent = location.hash;
+  img.src = CDN + location.pathname;
+  setTimeout(function(){ render(); }, 250);
+  const u = location.href; logger.info(u);`;
+const taint = analyze(taintPos, rules).filter((f) => f.category === 'sinks' && f.tags.includes('tainted'));
+const taintVals = taint.map((f) => f.value);
+for (const v of ['location.hash → innerHTML', 'document.referrer → insertAdjacentHTML', 'location.search → document.write', 'location.search → eval / Function', 'location.hash → location', 'location.href → setAttribute', 'window.name → srcdoc', 'location.search → dangerouslySetInnerHTML'])
+  check(taintVals.includes(v), `taint: ${v}`);
+check(taint.find((f) => f.value === 'location.hash → innerHTML')?.severity === 'high', 'HTML sink is high severity');
+const taintFP = analyze(taintNeg, rules).filter((f) => f.category === 'sinks' && f.tags.includes('tainted'));
+check(taintFP.length === 0, `no taint false positives (got: ${taintFP.map((f) => f.value).join(', ')})`);
+
 console.log('\nCloud providers');
 const cloudCode = `
 "https://objectstorage.us-ashburn-1.oraclecloud.com/n/acmetenant/b/backups/o/db.tar"

@@ -14,6 +14,7 @@
 import { entropy, decodeJwt, SEV_RANK } from './util.js';
 import { graphqlAt } from './graphql.js';
 import { routeInfo } from './routes.js';
+import { taintAt } from './taint.js';
 
 export const CATEGORY_LABELS = {
   secrets: 'Secrets',
@@ -83,6 +84,23 @@ export function secretConfidence(value, generic) {
 
 function ctxValue(v, m, ctx) {
   return { value: ctx.code.slice(ctx.index, ctx.index + 90).replace(/\s+/g, ' ').trim() };
+}
+
+const TAINT_DESC =
+  'A URL / attacker-influenced value (location, document.URL, window.name, a query parameter …) flows into this sink in the same expression. If it is not sanitised, this is DOM-based XSS (HTML / code sinks) or an open redirect (navigation sinks).';
+
+/** Post factory for a DOM-XSS sink: reports only when a taint source reaches the sink's value. */
+function taintPost(mode, sink, severity) {
+  return (v, m, ctx) => {
+    const t = taintAt(ctx.code, ctx.index, m[0].length, mode);
+    if (!t) return null;
+    return {
+      value: `${t.source} → ${sink}`,
+      severity,
+      tags: ['tainted', 'interesting'],
+      meta: { source: t.source, sink, expression: t.value },
+    };
+  };
 }
 
 function classifyJwt(v) {
@@ -986,6 +1004,21 @@ export const RULES = [
     /\$\([^)]{0,80}\)\.(?:html|append|prepend|after|before|replaceWith|wrap)\(\s*[^)\s'"`]/g, { enabled: false, post: ctxValue }),
   rule('source-dom', 'DOM XSS source', 'sinks', 'info',
     /\b(?:location\.(?:hash|search)|document\.(?:URL|documentURI|referrer)|window\.name)\b/g, { enabled: false, post: ctxValue }),
+
+  // ── DOM XSS taint flows (source → sink in one expression; precise enough to run by default) ──
+  rule('taint-innerhtml', 'Tainted HTML sink', 'sinks', 'high', /\.(?:inner|outer)HTML\s*\+?=(?!=)/g, { desc: TAINT_DESC, post: taintPost('assign', 'innerHTML', 'high') }),
+  rule('taint-insertadjacent', 'Tainted HTML sink', 'sinks', 'high', /\.insertAdjacentHTML\s*\(/g, { desc: TAINT_DESC, post: taintPost('call', 'insertAdjacentHTML', 'high') }),
+  rule('taint-docwrite', 'Tainted HTML sink', 'sinks', 'high', /\bdocument\.write(?:ln)?\s*\(/g, { desc: TAINT_DESC, post: taintPost('call', 'document.write', 'high') }),
+  rule('taint-react', 'Tainted HTML sink', 'sinks', 'high', /dangerouslySetInnerHTML/g, { desc: TAINT_DESC, post: taintPost('jsx', 'dangerouslySetInnerHTML', 'high') }),
+  rule('taint-jquery', 'Tainted HTML sink', 'sinks', 'medium', /\.(?:html|append|prepend|after|before|replaceWith)\s*\(/g, { desc: TAINT_DESC, post: taintPost('call', 'jQuery HTML', 'medium') }),
+  rule('taint-eval', 'Tainted code sink', 'sinks', 'high', /\b(?:eval|Function)\s*\(|\bset(?:Timeout|Interval)\s*\(/g, { desc: TAINT_DESC, post: taintPost('call', 'eval / Function', 'high') }),
+  rule('taint-location', 'Tainted navigation sink', 'sinks', 'medium',
+    /\b(?:window\.|document\.|top\.|self\.)?location(?:\.href)?\s*=(?!=)/g, { desc: TAINT_DESC, post: taintPost('assign', 'location', 'medium') }),
+  rule('taint-navcall', 'Tainted navigation sink', 'sinks', 'medium',
+    /\blocation\s*\.\s*(?:assign|replace)\s*\(|\bwindow\.open\s*\(/g, { desc: TAINT_DESC, post: taintPost('call', 'location / window.open', 'medium') }),
+  rule('taint-setattr', 'Tainted attribute sink', 'sinks', 'medium',
+    /\.setAttribute\s*\(\s*["'`](?:src|srcdoc|href|action|formaction)["'`]\s*,/g, { desc: TAINT_DESC, post: taintPost('call', 'setAttribute', 'medium') }),
+  rule('taint-srcdoc', 'Tainted attribute sink', 'sinks', 'medium', /\.srcdoc\s*=(?!=)/g, { desc: TAINT_DESC, post: taintPost('assign', 'srcdoc', 'medium') }),
 ];
 
 // ───────────────────────────── per-host rules ─────────────────────────────
