@@ -415,34 +415,28 @@ await chrome.storage.local.set({ settings: { ...mem.settings, scopeMode: 'all' }
 console.log('\nStatic file dumper & source reconstruction');
 {
   const { dumpHosts, sourcesZip } = await import('../ui/dump.js');
-  const { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } = await import('node:fs');
-  const { tmpdir } = await import('node:os');
-  const { join } = await import('node:path');
-  const { execFileSync } = await import('node:child_process');
+  const { readZip } = await import('./zip-read.mjs');
+  // Read the archive in-process: no dependency on the host's tar/unzip (GNU tar can't read zip).
   const unzip = async (blob) => {
-    const dir = mkdtempSync(join(tmpdir(), 'jsrecon-dump-'));
-    writeFileSync(join(dir, 'd.zip'), Buffer.from(await blob.arrayBuffer()));
-    execFileSync('tar', ['-xf', join(dir, 'd.zip'), '-C', dir]);
-    return dir;
+    const entries = readZip(Buffer.from(await blob.arrayBuffer()));
+    return { text: (n) => entries.get(n)?.data.toString('utf8'), has: (n) => entries.has(n), names: [...entries.keys()] };
   };
   let progress = 0;
   const r = await dumpHosts(['app.acme.test'], { js: true, maps: true, sources: true, nodeModules: false }, (d) => (progress = d));
-  const dir = await unzip(r.blob);
-  const base = join(dir, 'app.acme.test');
-  check(readFileSync(join(base, 'files/app.acme.test/static/main.abc.js'), 'utf8') === FILES['https://app.acme.test/static/main.abc.js'].body, 'JS file dumped byte-for-byte');
-  check(existsSync(join(base, 'files/app.acme.test/static/main.abc.js.map')), '.map file dumped');
-  check(readFileSync(join(base, 'sources/main.abc.js.map/src/api/payments.ts'), 'utf8').includes('STRIPE_KEY'), 'original source rebuilt from map (src/api/payments.ts)');
-  check(!existsSync(join(base, 'sources/main.abc.js.map/node_modules')), 'node_modules sources excluded by default');
-  check(!existsSync(join(base, 'files/app.acme.test/static/missing.js')), 'failed files skipped');
-  const idx = JSON.parse(readFileSync(join(dir, '_index.json'), 'utf8'));
+  const z = await unzip(r.blob);
+  const base = 'app.acme.test/';
+  check(z.text(base + 'files/app.acme.test/static/main.abc.js') === FILES['https://app.acme.test/static/main.abc.js'].body, 'JS file dumped byte-for-byte');
+  check(z.has(base + 'files/app.acme.test/static/main.abc.js.map'), '.map file dumped');
+  check(z.text(base + 'sources/main.abc.js.map/src/api/payments.ts')?.includes('STRIPE_KEY'), 'original source rebuilt from map (src/api/payments.ts)');
+  check(!z.names.some((n) => n.startsWith(base + 'sources/main.abc.js.map/node_modules/')), 'node_modules sources excluded by default');
+  check(!z.has(base + 'files/app.acme.test/static/missing.js'), 'failed files skipped');
+  const idx = JSON.parse(z.text('_index.json'));
   check(idx.files.length >= 5 && progress > 0, `_index.json lists ${idx.files.length} entries, ${r.files} files, ${r.errors} errors`);
-  rmSync(dir, { recursive: true, force: true });
 
   const mapFile = mem['host:app.acme.test'].files['https://app.acme.test/static/main.abc.js.map'];
   const one = await sourcesZip('app.acme.test', mapFile);
-  const dir2 = await unzip(one.blob);
-  check(one.files === 1 && existsSync(join(dir2, 'app.acme.test/main.abc.js.map/src/api/payments.ts')), 'single-map "Sources .zip"');
-  rmSync(dir2, { recursive: true, force: true });
+  const z2 = await unzip(one.blob);
+  check(one.files === 1 && z2.has('app.acme.test/main.abc.js.map/src/api/payments.ts'), 'single-map "Sources .zip"');
 }
 
 console.log('\nRescan & clear');

@@ -4,22 +4,7 @@ import { analyze } from '../src/analyzer.js';
 import { buildRules, RULES, parseCustomRules, classifyLink, makeSubdomainRule } from '../src/rules.js';
 import { ZipWriter, zipPath } from '../src/zip.js';
 import { buildMatcher, findMatches } from '../ui/search.js';
-import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { execFileSync } from 'node:child_process';
-
-// Extract a .zip for the ZIP-writer round-trip test. bsdtar (Windows, macOS, local PowerShell)
-// reads zip directly; GNU tar on Linux does not, so fall back to unzip (present on CI runners).
-function extractZip(zipFile, outDir) {
-  try {
-    execFileSync('tar', ['-xf', zipFile, '-C', outDir], { stdio: 'pipe' });
-    if (readFileSync(join(outDir, 'acme.io/static/js/main.js'), 'utf8')) return;
-  } catch {
-    /* fall through to unzip */
-  }
-  execFileSync('unzip', ['-qq', '-o', zipFile, '-d', outDir], { stdio: 'pipe' });
-}
+import { readZip } from './zip-read.mjs';
 
 const rules = buildRules({});
 const rep = (c, n) => c.repeat(n);
@@ -746,15 +731,12 @@ await zip.add('acme.io/static/js/main.js', 'dup name');
 await zip.add(zipPath('acme.io/../evil/<x>:y.js'), 'sanitised');
 await zip.add('acme.io/ünïcode.txt', 'utf8');
 const zbuf = Buffer.from(await zip.blob().arrayBuffer());
-const tmp = mkdtempSync(join(tmpdir(), 'jsrecon-zip-'));
-writeFileSync(join(tmp, 't.zip'), zbuf);
-mkdirSync(join(tmp, 'out'));
-extractZip(join(tmp, 't.zip'), join(tmp, 'out'));
-check(readFileSync(join(tmp, 'out/acme.io/static/js/main.js'), 'utf8') === zipText, `deflated entry round-trips (${zipText.length} → ${zbuf.length} bytes zip)`);
-check(readFileSync(join(tmp, 'out/acme.io/static/js/main~2.js'), 'utf8') === 'dup name', 'duplicate names made unique');
-check(readFileSync(join(tmp, 'out/acme.io/_/evil/_x__y.js'), 'utf8') === 'sanitised', 'path traversal and invalid chars sanitised');
-check(readFileSync(join(tmp, 'out/acme.io/ünïcode.txt'), 'utf8') === 'utf8', 'UTF-8 file names');
-rmSync(tmp, { recursive: true, force: true });
+const zent = readZip(zbuf); // throws on bad headers, sizes or CRC-32
+const ztext = (n) => zent.get(n)?.data.toString('utf8');
+check(ztext('acme.io/static/js/main.js') === zipText && zent.get('acme.io/static/js/main.js').method === 8, `deflated entry round-trips (${zipText.length} → ${zbuf.length} bytes zip)`);
+check(ztext('acme.io/static/js/main~2.js') === 'dup name', 'duplicate names made unique');
+check(ztext('acme.io/_/evil/_x__y.js') === 'sanitised' && ![...zent.keys()].some((n) => n.startsWith('/') || n.split('/').includes('..')), 'path traversal and invalid chars sanitised');
+check(ztext('acme.io/ünïcode.txt') === 'utf8' && [...zent.values()].every((e) => e.utf8), 'UTF-8 file names (flagged in headers)');
 
 console.log('\nContent search (grep helpers)');
 {
