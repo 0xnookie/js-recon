@@ -53,17 +53,32 @@
   async function getSettings() {
     try {
       const { settings = {} } = await chrome.storage.local.get('settings');
-      return { enabled: true, scanInline: true, scanHtml: true, scopeMode: 'active', allowHosts: [], denyHosts: [], ...settings };
+      return { enabled: true, scanInline: true, scanHtml: true, scopeMode: 'ask', allowHosts: [], denyHosts: [], ...settings };
     } catch {
       return null; // extension was reloaded; this content script is orphaned
     }
   }
 
-  function inScope(s) {
-    const h = location.hostname;
-    if (hostMatches(h, s.denyHosts)) return false;
-    if (s.scopeMode === 'allowlist' && !hostMatches(h, s.allowHosts)) return false;
-    return true;
+  // "Ask first" mode: once the service worker says this tab was OK'd, it stays OK for this document.
+  let approved = false;
+
+  async function inScope(s) {
+    if (!IS_FRAME) {
+      const h = location.hostname;
+      if (hostMatches(h, s.denyHosts)) return false;
+      if (s.scopeMode === 'allowlist') return hostMatches(h, s.allowHosts);
+      if (s.scopeMode !== 'ask' || hostMatches(h, s.allowHosts)) return true;
+    } else if (s.scopeMode !== 'ask') {
+      return true; // other modes: the service worker checks frames against the top page
+    }
+    // unapproved pages (and their frames) send nothing; the worker knows about one-off tab approvals
+    if (approved) return true;
+    try {
+      approved = (await chrome.runtime.sendMessage({ type: 'scope' }))?.state === 'scan';
+    } catch {
+      /* service worker restarting or extension reloaded */
+    }
+    return approved;
   }
 
   function scriptUrls() {
@@ -95,7 +110,7 @@
 
   async function collect({ force = false, html = true } = {}) {
     const s = await getSettings();
-    if (!s || (!force && (!s.enabled || (!IS_FRAME && !inScope(s))))) return;
+    if (!s || (!force && (!s.enabled || !(await inScope(s))))) return;
     const msg = {
       type: 'page-collect',
       pageUrl: location.href,

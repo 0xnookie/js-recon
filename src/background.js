@@ -5,7 +5,7 @@ import { analyze } from './analyzer.js';
 import { buildRules, makeSubdomainRule, packageRoot, classifyLink, INTERESTING_RE, inputFinding, apiEndpoint, analyzeMessageHandler, POSTMESSAGE_DESC } from './rules.js';
 import { observedRequest, normalizePath, orderCaptures, scriptFamily } from './requests.js';
 import { replayCandidates } from './exporters.js';
-import { DEFAULT_SETTINGS, getSettings } from './settings.js';
+import { DEFAULT_SETTINGS, getSettings, saveSettings } from './settings.js';
 import { SEV_RANK, sha1, siteOf, hostMatches, hostOf, truncate } from './util.js';
 import { sourceMapRef, decodeDataUri, parseSourceMap, mapEntries, cleanSourcePath, probeCandidates } from './sourcemap.js';
 import { findChunks } from './chunks.js';
@@ -26,9 +26,42 @@ let readyPromise = null;
 
 function applySettings(settings) {
   state = { settings, rules: buildRules(settings), hostRules: new Map() };
-  readyPromise = Promise.resolve(state);
+  readyPromise = approvalsLoaded.then(() => state);
   syncRuntimeScript(settings);
   return state;
+}
+
+// ── "Ask first" scope: one-off "Scan this tab" approvals (tabId → host). Kept in session storage so
+//    they survive service-worker restarts but not a browser restart; a tab leaving the host drops it. ──
+
+const APPROVALS_KEY = 'approvedTabs';
+let approvedTabs = new Map();
+const approvalsLoaded = (async () => {
+  try {
+    const r = await chrome.storage.session?.get(APPROVALS_KEY);
+    approvedTabs = new Map(Object.entries(r?.[APPROVALS_KEY] || {}).map(([id, host]) => [Number(id), host]));
+  } catch {
+    /* session storage unavailable */
+  }
+})();
+
+function saveApprovals() {
+  try {
+    chrome.storage.session?.set({ [APPROVALS_KEY]: Object.fromEntries(approvedTabs) })?.catch(() => {});
+  } catch {
+    /* ignore */
+  }
+}
+
+function dropApproval(tabId) {
+  if (approvedTabs.delete(tabId)) saveApprovals();
+}
+
+/** 'ask' mode only: true while the tab's page waits for the user's OK (not allow-/deny-listed, not approved). */
+function awaitingApproval(u, s, tabId) {
+  if (s.scopeMode !== 'ask' || tabId < 0) return false; // tabId -1: an explicit scan from the UI
+  if (hostMatches(u.hostname, s.allowHosts) || hostMatches(u.hostname, s.denyHosts)) return false;
+  return approvedTabs.get(tabId) !== u.host;
 }
 
 // ── runtime hooks (opt-in): src/runtime.js is registered into the page's own world only while enabled ──
@@ -55,8 +88,9 @@ function syncRuntimeScript(s) {
       const existing = await api.getRegisteredContentScripts({ ids: [RUNTIME_SCRIPT_ID] });
       if (existing.length) await api.unregisterContentScripts({ ids: [RUNTIME_SCRIPT_ID] });
       if (!want) return;
-      // only where we'd scan anyway: the allow-list (if used), never the deny-list
-      const matches = s.scopeMode === 'allowlist' ? matchPatterns(s.allowHosts) : ['http://*/*', 'https://*/*'];
+      // only where we'd scan anyway: the allow-list (if used), never the deny-list. In "ask first" mode
+      // that's the allow-list too; a one-off approved tab gets the hooks injected when it is approved.
+      const matches = s.scopeMode === 'allowlist' || s.scopeMode === 'ask' ? matchPatterns(s.allowHosts) : ['http://*/*', 'https://*/*'];
       if (!matches.length) return;
       const excludeMatches = matchPatterns(s.denyHosts);
       await api.registerContentScripts([
@@ -85,7 +119,10 @@ function rulesFor(host) {
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local') return;
-  if (changes.settings) applySettings({ ...DEFAULT_SETTINGS, ...(changes.settings.newValue || {}) });
+  if (changes.settings) {
+    applySettings({ ...DEFAULT_SETTINGS, ...(changes.settings.newValue || {}) });
+    refreshAllBadges().catch(() => {}); // scope / pause changes flip the "?" (awaiting approval) badge
+  }
   for (const k of Object.keys(changes)) {
     if (k.startsWith('host:') && changes[k].newValue === undefined) hostCache.delete(k.slice(5));
   }
@@ -264,12 +301,34 @@ function scheduleBadge(host) {
     setTimeout(async () => {
       badgeTimers.delete(host);
       const tabs = await chrome.tabs.query({});
-      for (const t of tabs) if (hostOf(t.url || '') === host) setBadge(t.id, host);
+      for (const t of tabs) if (hostOf(t.url || '') === host) setBadge(t.id, host, t.url);
     }, 800),
   );
 }
 
-async function setBadge(tabId, host) {
+async function setBadge(tabId, host, url) {
+  const { settings } = await ready();
+  let u = null;
+  try {
+    u = /^https?:/i.test(url || '') ? new URL(url) : null;
+  } catch {
+    /* not a web page */
+  }
+  if (u && settings.enabled && awaitingApproval(u, settings, tabId)) {
+    try {
+      await chrome.action.setBadgeText({ tabId, text: '?' });
+      await chrome.action.setBadgeBackgroundColor({ tabId, color: '#f5a524' });
+      await chrome.action.setTitle?.({ tabId, title: `JS Recon — not scanning ${u.host}. Click to choose.` });
+    } catch {
+      /* tab closed */
+    }
+    return;
+  }
+  try {
+    await chrome.action.setTitle?.({ tabId, title: 'JS Recon' });
+  } catch {
+    /* tab closed */
+  }
   let s = null;
   if (host) {
     const p = hostCache.get(host);
@@ -288,12 +347,15 @@ async function setBadge(tabId, host) {
 
 async function refreshAllBadges() {
   const tabs = await chrome.tabs.query({});
-  for (const t of tabs) setBadge(t.id, hostOf(t.url || ''));
+  for (const t of tabs) setBadge(t.id, hostOf(t.url || ''), t.url);
 }
 
 chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
-  if (info.url) activeCollected.delete(tabId); // navigated: let active-tab mode re-scan it when focused
-  if (info.status === 'complete' || info.url) setBadge(tabId, hostOf(tab.url || ''));
+  if (info.url) {
+    activeCollected.delete(tabId); // navigated: let active-tab mode re-scan it when focused
+    if (approvedTabs.has(tabId) && approvedTabs.get(tabId) !== hostOf(info.url)) dropApproval(tabId); // left the approved host
+  }
+  if (info.status === 'complete' || info.url) setBadge(tabId, hostOf(tab.url || ''), tab.url);
 });
 
 // ───────────────────────── fetching ─────────────────────────
@@ -1115,6 +1177,7 @@ chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   activeCollected.delete(tabId);
+  dropApproval(tabId);
   for (const [w, id] of activeByWindow) if (id === tabId) activeByWindow.delete(w);
 });
 chrome.windows?.onRemoved?.addListener((windowId) => activeByWindow.delete(windowId));
@@ -1130,6 +1193,7 @@ function scopeFor(pageUrl, s, tabId) {
   if (hostMatches(u.hostname, s.denyHosts)) return null;
   if (s.scopeMode === 'allowlist' && !hostMatches(u.hostname, s.allowHosts)) return null;
   if (s.scopeMode === 'active' && tabId != null && tabId >= 0 && !isActiveTab(tabId)) return null;
+  if (awaitingApproval(u, s, tabId)) return null; // "ask first": nothing until the user OKs the site
   return { host: u.host, origin: u.origin };
 }
 
@@ -1382,19 +1446,84 @@ async function rescan({ tabId, host }) {
     }
     queueDependencyChecks(host, data, true);
   }
-  if (tabId != null) {
+  if (tabId != null) return collectTab(tabId, true);
+  return { ok: true };
+}
+
+/** Asks the tab's content script to report the page; injects it first if the tab predates the extension. */
+async function collectTab(tabId, force) {
+  try {
+    await chrome.tabs.sendMessage(tabId, { type: 'collect', force });
+  } catch {
     try {
-      await chrome.tabs.sendMessage(tabId, { type: 'collect', force: true });
-    } catch {
-      try {
-        await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ['src/content.js'] });
-        await chrome.tabs.sendMessage(tabId, { type: 'collect', force: true });
-      } catch (e) {
-        return { ok: false, error: 'Cannot access this page: ' + (e.message || e) };
-      }
+      await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ['src/content.js'] });
+      // a freshly injected content script collects on its own (in scope); a forced scan needs the nudge
+      if (force) await chrome.tabs.sendMessage(tabId, { type: 'collect', force: true });
+    } catch (e) {
+      return { ok: false, error: 'Cannot access this page: ' + (e.message || e) };
     }
   }
   return { ok: true };
+}
+
+// ── "Ask first": scope state for the content script / popup, and the user's answer ──
+
+async function scopeState(msg, sender) {
+  const { settings } = await ready();
+  const tabId = msg.tabId ?? sender.tab?.id;
+  let u;
+  try {
+    u = new URL(msg.url || sender.tab?.url || '');
+  } catch {
+    return { state: 'off' };
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return { state: 'off' };
+  const base = { host: u.host, hostname: u.hostname, mode: settings.scopeMode };
+  if (!settings.enabled) return { ...base, state: 'off' };
+  if (awaitingApproval(u, settings, tabId ?? null)) return { ...base, state: 'ask' };
+  return { ...base, state: scopeFor(u.href, settings, tabId ?? null) ? 'scan' : 'off' };
+}
+
+const withHost = (list, name) => (hostMatches(name, list) ? list || [] : [...(list || []), name]);
+
+/** choice: 'tab' (this tab, while it stays on the host) | 'always' (allow-list) | 'never' (deny-list). */
+async function approve({ tabId, url, choice }) {
+  const { settings } = await ready();
+  let u;
+  try {
+    u = new URL(url || '');
+  } catch {
+    return { ok: false, error: 'No website in this tab' };
+  }
+  if ((u.protocol !== 'http:' && u.protocol !== 'https:') || tabId == null) return { ok: false, error: 'No website in this tab' };
+  const name = u.hostname.toLowerCase();
+  if (choice === 'never') {
+    applySettings(await saveSettings({ denyHosts: withHost(settings.denyHosts, name) }));
+    dropApproval(tabId);
+    await setBadge(tabId, u.host, u.href);
+    return { ok: true };
+  }
+  let tabs = [{ id: tabId, url: u.href }];
+  if (choice === 'always') {
+    applySettings(await saveSettings({ allowHosts: withHost(settings.allowHosts, name) }));
+    // every open tab on that host starts scanning, not just this one
+    tabs = (await chrome.tabs.query({}).catch(() => [])).filter((t) => t.id === tabId || (/^https?:/i.test(t.url || '') && hostMatches(new URL(t.url).hostname, [name])));
+    if (!tabs.some((t) => t.id === tabId)) tabs.push({ id: tabId, url: u.href });
+  } else if (choice === 'tab') {
+    approvedTabs.set(tabId, u.host);
+    saveApprovals();
+  } else return { ok: false, error: 'Unknown choice' };
+  let res = { ok: true };
+  for (const t of tabs) {
+    const r = await collectTab(t.id, false);
+    if (t.id === tabId) res = r;
+    if (state.settings.runtimeHooks) {
+      // registered hooks cover the next page load; hook the page that is already open now
+      chrome.scripting.executeScript({ target: { tabId: t.id, allFrames: true }, files: ['src/runtime.js'], world: 'MAIN' }).catch(() => {});
+    }
+    setBadge(t.id, hostOf(t.url || u.href), t.url || u.href);
+  }
+  return res;
 }
 
 async function scanUrls({ host, urls }) {
@@ -1441,6 +1570,8 @@ const HANDLERS = {
   replay: replayToProxy,
   probe: probeEndpoints,
   rescan,
+  scope: scopeState,
+  approve,
   'scan-urls': scanUrls,
   'scan-text': scanPastedText,
   status,
@@ -1456,6 +1587,26 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return true;
 });
 
-chrome.runtime.onInstalled.addListener(() => {
+const olderThan = (v, ref) => {
+  const a = String(v || '0').split('.').map(Number);
+  const b = ref.split('.').map(Number);
+  for (let i = 0; i < 3; i++) if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) < (b[i] || 0);
+  return false;
+};
+
+chrome.runtime.onInstalled.addListener(async ({ reason, previousVersion } = {}) => {
+  // 1.8.0 makes "ask first" the default. Settings are stored whole, so an install that ever saved them
+  // still holds the old default ("active" since 1.6.0, "all" before); move those over once. An explicit
+  // allow-list setup is left alone.
+  if (reason === 'update' && olderThan(previousVersion, '1.8.0')) {
+    try {
+      const { settings } = await chrome.storage.local.get('settings');
+      if (settings && (settings.scopeMode === 'active' || settings.scopeMode === 'all' || !settings.scopeMode)) {
+        await chrome.storage.local.set({ settings: { ...settings, scopeMode: 'ask' } });
+      }
+    } catch {
+      /* keep the stored settings */
+    }
+  }
   ready();
 });

@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "JS Recon",
   "short_name": "JS Recon",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "description": "Scans the JavaScript of pages you visit for endpoints, API keys, secrets, source maps, cloud assets and other recon data.",
   "minimum_chrome_version": "116",
   "icons": {

@@ -5,6 +5,27 @@ All notable changes to **JS Recon** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] — 2026-11-12
+
+### Changed
+- **Ask before scanning a site (new default scope).** Opening a tab no longer starts a
+  scan: nothing is fetched, observed or hooked on a site until you OK it. A tab that is
+  waiting shows a **?** on the toolbar icon, and the popup offers **Scan this tab**
+  (one-off, while the tab stays on that host; kept across service-worker restarts, not
+  browser restarts), **Always scan this site** (adds it to the allow-list) or **Never**
+  (adds it to the deny-list). Pressing Rescan on a waiting tab counts as "Scan this tab".
+  In this mode runtime hooks are registered for allow-listed sites only and injected
+  into a tab when you approve it.
+- **Updating moves "Only the active tab" and "Every open tab" to the new mode once.**
+  Settings are stored whole, so installs that ever saved them kept an old default
+  (1.6.0 changed the default without migrating, leaving such installs on "Every open
+  tab"). An allow-list setup is left alone; pick another mode in Settings → Scope.
+
+### Fixed
+- CI: the ZIP round-trip tests read archives in-process instead of shelling out to
+  `tar` / `unzip`. Ubuntu 24.04's `unzip` ignores the UTF-8 name flag, which failed every
+  CI and release run since the workflows were added.
+
 ## [1.7.0] — 2026-11-11
 
 ### Added
@@ -84,6 +105,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   response headers of the pages you visit, surfacing endpoints, API keys, secrets, source
   maps, cloud assets and other recon data, with per-host findings and report exports.
 
+[1.8.0]: https://github.com/0xnookie/js-recon/releases/tag/v1.8.0
 [1.7.0]: https://github.com/0xnookie/js-recon/releases/tag/v1.7.0
 [1.6.0]: https://github.com/0xnookie/js-recon/releases/tag/v1.6.0
 [1.5.0]: https://github.com/0xnookie/js-recon/releases/tag/v1.5.0

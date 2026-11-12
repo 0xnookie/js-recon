@@ -37,7 +37,9 @@ export const DEFAULT_SETTINGS = {
   concurrency: 4,
   checkNpm: true, // verify discovered package names against registry.npmjs.org (dependency confusion)
   notify: false, // desktop notification on new critical / high-severity findings
-  scopeMode: 'active', // 'active' (only the tab in front) | 'all' (every open tab) | 'allowlist'
+  // 'ask' (nothing is scanned until you OK the site from the popup) | 'active' (only the tab in front)
+  // | 'all' (every open tab) | 'allowlist'
+  scopeMode: 'ask',
   allowHosts: [],
   denyHosts: [],
   ignoreScriptHosts: DEFAULT_IGNORED_SCRIPT_HOSTS,

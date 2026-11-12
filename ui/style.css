@@ -320,6 +320,18 @@ button.mini:hover {
   border-color: var(--border-hover);
 }
 
+button.mini.primary,
+button.mini.primary:hover {
+  font-weight: 600;
+  color: var(--primary-ink);
+  background: var(--primary);
+  border-color: var(--primary);
+}
+
+button.mini.primary:hover {
+  opacity: 0.85;
+}
+
 /* ── inputs ── */
 
 input[type='text'],
@@ -809,6 +821,27 @@ body.full .host-select {
 .banner.change .mono {
   font-size: 11.5px;
   color: var(--text);
+}
+
+/* "ask first": this tab's site isn't approved; findings shown are from an earlier scan */
+.banner.ask {
+  gap: 6px;
+  padding-right: 10px;
+}
+
+.banner.ask > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.empty .ask-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 14px;
 }
 
 /* ── panels (manual scan, dump) ── */

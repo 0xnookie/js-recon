@@ -782,6 +782,61 @@ function renderChangeBanner() {
   el.hidden = false;
 }
 
+// ── "Ask first": the site in this tab waits for the user's OK before anything is scanned ──
+
+async function refreshAsk() {
+  ui.ask = null;
+  if (FULL || ui.tabId == null || !ui.tabUrl) return;
+  try {
+    const r = await chrome.runtime.sendMessage({ type: 'scope', tabId: ui.tabId, url: ui.tabUrl });
+    if (r?.state === 'ask') ui.ask = r;
+  } catch {
+    /* worker starting */
+  }
+}
+
+const askingHere = () => !!ui.ask && ui.host === ui.tabHost;
+
+/** The three answers; `kind` 'btn' for the full-size empty-state card, 'mini' for the banner. */
+function askButtons(kind) {
+  const name = ui.ask.hostname;
+  const make = (label, title, choice, primary) =>
+    kind === 'btn' ? h('button', { class: `btn${primary ? ' primary' : ''}`, title, onclick: () => decide(choice) }, label) : btn(label, title, () => decide(choice), primary ? 'primary' : '');
+  return [
+    make('Scan this tab', `Scan ${name} in this tab while it stays on the site. Other tabs and later visits ask again.`, 'tab', true),
+    make('Always scan this site', `Add ${name} to the allow-list (Settings → Scope) and scan it in every tab without asking`, 'always'),
+    make('Never for this site', `Add ${name} to the deny-list (Settings → Scope)`, 'never'),
+  ];
+}
+
+function renderAskBanner() {
+  const el = $('#askBanner');
+  const show = askingHere() && !!ui.data;
+  el.hidden = !show;
+  if (show) {
+    el.replaceChildren(
+      h('span', {}, h('b', {}, `Not scanning ${ui.ask.host} in this tab.`), ' Findings below are from an earlier scan.'),
+      h('span', { class: 'spacer' }),
+      ...askButtons('mini'),
+    );
+  }
+}
+
+async function decide(choice) {
+  const host = ui.ask?.host || ui.tabHost;
+  let r = null;
+  try {
+    r = await chrome.runtime.sendMessage({ type: 'approve', tabId: ui.tabId, url: ui.tabUrl, choice });
+  } catch {
+    /* worker starting */
+  }
+  if (!r?.ok) return toast(r?.error || 'Could not reach the extension, try again');
+  ui.ask = null;
+  toast(choice === 'never' ? `Won't scan ${host} (undo in Settings → Scope)` : choice === 'always' ? `Scanning ${host} (added to the allow-list)` : `Scanning ${host} in this tab`);
+  render();
+  pollStatus();
+}
+
 function emptyState(title, text) {
   return h('div', { class: 'empty' }, h('div', { class: 'empty-mark' }, '{ }'), title ? h('b', {}, title) : null, text ? h('p', {}, text) : null);
 }
@@ -791,6 +846,7 @@ function render() {
   renderTabs();
   renderToolbar();
   renderChangeBanner();
+  renderAskBanner();
   const list = $('#list');
   const scroll = list.scrollTop;
   list.replaceChildren();
@@ -801,7 +857,11 @@ function render() {
     return;
   }
   if (!ui.data) {
-    list.append(emptyState(`Nothing scanned for ${ui.host} yet`, 'Reload the page or press Rescan. Scripts are captured as the page loads them.'));
+    if (askingHere()) {
+      const card = emptyState(`Scan ${ui.ask.host}?`, 'JS Recon asks before scanning a site. Nothing has been fetched from it yet.');
+      card.append(h('div', { class: 'ask-actions' }, ...askButtons('btn')));
+      list.append(card);
+    } else list.append(emptyState(`Nothing scanned for ${ui.host} yet`, 'Reload the page or press Rescan. Scripts are captured as the page loads them.'));
     $('#count').textContent = '';
     return;
   }
@@ -1417,6 +1477,7 @@ function bind() {
 
   $('#btnRescan').addEventListener('click', async () => {
     if (!ui.host) return;
+    if (askingHere()) return decide('tab'); // pressing Rescan on an unapproved tab is the OK for this tab
     const tabId = ui.tabHost === ui.host ? ui.tabId : null;
     const r = await chrome.runtime.sendMessage({ type: 'rescan', host: ui.host, tabId });
     toast(r?.ok ? 'Rescan queued' : r?.error || 'Rescan failed');
@@ -1506,6 +1567,7 @@ function bind() {
     if (changes.settings) {
       ui.settings = { ...ui.settings, ...(changes.settings.newValue || {}) };
       renderPause();
+      refreshAsk().then(render);
     }
   });
 }
@@ -1524,10 +1586,12 @@ async function init() {
     if (tab && !FULL && /^https?:/i.test(tab.url || '')) {
       ui.tabHost = hostOf(tab.url);
       ui.tabId = tab.id;
+      ui.tabUrl = tab.url;
     }
   } catch {
     /* ignore */
   }
+  await refreshAsk();
   await refreshIndex();
   if (!ui.host) {
     ui.host = ui.tabHost || (FULL ? Object.entries(ui.index).sort((a, b) => (b[1].updated || 0) - (a[1].updated || 0))[0]?.[0] : null) || null;

@@ -57,13 +57,14 @@
         <h2>Scope</h2>
         <p>Hosts match themselves and all subdomains (<code>example.com</code> = <code>*.example.com</code>). One per line.</p>
         <div class="radio-row">
+          <label><input type="radio" name="scopeMode" value="ask" /> Ask before scanning a site</label>
           <label><input type="radio" name="scopeMode" value="active" /> Only the active tab</label>
           <label><input type="radio" name="scopeMode" value="all" /> Every open tab</label>
           <label><input type="radio" name="scopeMode" value="allowlist" /> Only sites in the allow-list</label>
         </div>
-        <p>“Only the active tab” scans just the page you’re looking at — background tabs are left alone until you switch to them. The deny-list always applies.</p>
+        <p>“Ask before scanning” fetches nothing from a site until you OK it: a <b>?</b> on the toolbar icon means the tab is waiting, and the popup offers <i>Scan this tab</i>, <i>Always scan this site</i> (adds it to the allow-list) or <i>Never</i> (adds it to the deny-list). “Only the active tab” scans just the page you’re looking at; background tabs are left alone until you switch to them. The deny-list always applies.</p>
         <div class="opt-grid">
-          <div class="field"><label>Allow-list (pages)</label><textarea data-key="allowHosts" data-list spellcheck="false" placeholder="target.com&#10;*.target-staging.io"></textarea><small>Used when “Only sites in the allow-list” is selected.</small></div>
+          <div class="field"><label>Allow-list (pages)</label><textarea data-key="allowHosts" data-list spellcheck="false" placeholder="target.com&#10;*.target-staging.io"></textarea><small>Scanned without asking in “Ask before scanning” mode; the only sites scanned in “Only sites in the allow-list” mode.</small></div>
           <div class="field"><label>Deny-list (pages)</label><textarea data-key="denyHosts" data-list spellcheck="false" placeholder="mail.google.com&#10;mybank.com"></textarea><small>Pages on these hosts are never scanned.</small></div>
         </div>
         <div class="field" style="margin-top: 12px">

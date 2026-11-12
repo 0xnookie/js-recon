@@ -58,10 +58,12 @@ globalThis.fetch = async (url) => {
 
 // ── chrome mock ──
 const mem = {};
-const listeners = { storage: [], webRequest: [], sendHeaders: [], message: [], tabsUpdated: [], tabsActivated: [], tabsRemoved: [] };
+const memSession = {};
+const listeners = { storage: [], webRequest: [], sendHeaders: [], message: [], tabsUpdated: [], tabsActivated: [], tabsRemoved: [], installed: [] };
 const registered = new Map(); // dynamically registered content scripts
 const clone = (v) => (v === undefined ? undefined : structuredClone(v));
 const badges = {};
+const titles = {};
 globalThis.chrome = {
   storage: {
     local: {
@@ -86,6 +88,16 @@ globalThis.chrome = {
           delete mem[k];
         }
         listeners.storage.forEach((l) => l(changes, 'local'));
+      },
+    },
+    session: {
+      async get(keys) {
+        const out = {};
+        for (const k of [].concat(keys)) if (k in memSession) out[k] = clone(memSession[k]);
+        return out;
+      },
+      async set(obj) {
+        for (const [k, v] of Object.entries(obj)) memSession[k] = clone(v);
       },
     },
     onChanged: { addListener: (l) => listeners.storage.push(l) },
@@ -114,10 +126,11 @@ globalThis.chrome = {
   action: {
     setBadgeText: async ({ tabId, text }) => (badges[tabId] = text),
     setBadgeBackgroundColor: async () => {},
+    setTitle: async ({ tabId, title }) => (titles[tabId] = title),
   },
   runtime: {
     onMessage: { addListener: (l) => listeners.message.push(l) },
-    onInstalled: { addListener: () => {} },
+    onInstalled: { addListener: (l) => listeners.installed.push(l) },
     getURL: (p) => 'chrome-extension://x/' + p,
   },
   notifications: { create: () => {} },
@@ -410,6 +423,61 @@ FILES['https://app.acme.test/static/active-tab.js'] = { body: 'x' };
 fire('https://app.acme.test/static/active-tab.js', 'script', 7);
 await drain();
 check(fetched.length === beforeActive + 1, 'active tab scanned in active-tab mode');
+
+// ask-first mode (the default): nothing is fetched until the user OKs the site in the popup
+console.log('\nAsk before scanning');
+await chrome.storage.local.set({ settings: { ...mem.settings, scopeMode: 'ask', allowHosts: [], denyHosts: [] } });
+const tabUpdate = (tabId, url) => listeners.tabsUpdated.forEach((l) => l(tabId, { url, status: 'complete' }, { id: tabId, url }));
+tabUpdate(7, PAGE);
+await sleep(50);
+check(badges[7] === '?' && /not scanning app\.acme\.test/.test(titles[7] || ''), `unapproved tab shows a "?" badge (${badges[7]}: ${titles[7]})`);
+check((await send({ type: 'scope' })).state === 'ask', 'scope state for the tab: ask');
+const pcAsk = await send({ type: 'page-collect', pageUrl: PAGE, scripts: ['https://app.acme.test/static/ask-1.js'], inline: [], html: '<html></html>' });
+const beforeAsk = fetched.length;
+FILES['https://app.acme.test/static/ask-1.js'] = { body: 'var a="/api/ask/one";' };
+FILES['https://app.acme.test/static/ask-2.js'] = { body: 'var b="/api/ask/two";' };
+fire('https://app.acme.test/static/ask-1.js', 'script', 7);
+await drain();
+check(pcAsk.ok === false && fetched.length === beforeAsk, 'nothing collected or fetched before the user answers');
+
+check((await send({ type: 'approve', tabId: 7, url: PAGE, choice: 'tab' })).ok, '"Scan this tab" accepted');
+await sleep(50);
+check(memSession.approvedTabs?.[7] === 'app.acme.test', 'one-off approval kept in session storage (survives worker restarts)');
+check((await send({ type: 'scope' })).state === 'scan' && badges[7] !== '?', 'approved tab: state scan, "?" badge cleared');
+fire('https://app.acme.test/static/ask-1.js', 'script', 7);
+fire('https://app.acme.test/static/ask-2.js', 'script', 8);
+await drain();
+check(fetched.includes('https://app.acme.test/static/ask-1.js') && !fetched.includes('https://app.acme.test/static/ask-2.js'), 'approved tab scanned; another tab on the same site still waits');
+tabUpdate(7, 'https://other.example/');
+check(!memSession.approvedTabs?.[7], 'approval dropped when the tab navigates to another host');
+
+check((await send({ type: 'approve', tabId: 8, url: PAGE, choice: 'always' })).ok && mem.settings.allowHosts.includes('app.acme.test'), '"Always scan this site" adds the host to the allow-list');
+fire('https://app.acme.test/static/ask-2.js', 'script', 8);
+await drain();
+check(fetched.includes('https://app.acme.test/static/ask-2.js'), 'allow-listed site scanned in any tab without asking');
+await chrome.storage.local.set({ settings: { ...mem.settings, runtimeHooks: true } });
+await sleep(50);
+check(JSON.stringify(registered.get('jsrecon-runtime')?.matches) === JSON.stringify(['*://app.acme.test/*', '*://*.app.acme.test/*']), 'runtime hooks registered only for allow-listed sites in ask mode');
+await chrome.storage.local.set({ settings: { ...mem.settings, runtimeHooks: false } });
+
+const adsPage = 'https://ads.other.example/x';
+check((await send({ type: 'approve', tabId: 9, url: adsPage, choice: 'never' })).ok && mem.settings.denyHosts.includes('ads.other.example'), '"Never" adds the host to the deny-list');
+check((await send({ type: 'scope' }, { tab: { id: 9, url: adsPage } })).state === 'off', 'deny-listed site: no prompt');
+
+// upgrading: installs still holding the old default scope move to ask-first once
+const upgrade = async (previousVersion) => {
+  for (const l of listeners.installed) await l({ reason: 'update', previousVersion });
+};
+await chrome.storage.local.set({ settings: { ...mem.settings, scopeMode: 'all' } });
+await upgrade('1.7.0');
+check(mem.settings.scopeMode === 'ask', 'update from 1.7.0: "every open tab" → ask first');
+await chrome.storage.local.set({ settings: { ...mem.settings, scopeMode: 'allowlist' } });
+await upgrade('1.6.0');
+check(mem.settings.scopeMode === 'allowlist', 'update: explicit allow-list setup left alone');
+await chrome.storage.local.set({ settings: { ...mem.settings, scopeMode: 'active' } });
+await upgrade('1.8.0');
+check(mem.settings.scopeMode === 'active', 'no migration when already on 1.8.0');
+await chrome.storage.local.set({ settings: { ...mem.settings, allowHosts: [], denyHosts: [] } });
 await chrome.storage.local.set({ settings: { ...mem.settings, scopeMode: 'all' } });
 
 console.log('\nStatic file dumper & source reconstruction');
