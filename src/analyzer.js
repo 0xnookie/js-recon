@@ -54,6 +54,19 @@ function context(text, index, len, radius) {
   ];
 }
 
+/** Same endpoint called with different bodies: keep the union of the field names. */
+export function mergeBody(f, r) {
+  const names = (s) => String(s || '').split(', ').filter(Boolean);
+  const meta = r.meta || {};
+  if (r.tags?.includes('idor') && !f.tags.includes('idor')) f.tags = [...f.tags, 'idor'];
+  const all = [...new Set([...names(f.meta?.body), ...names(meta.body)])];
+  if (all.length === names(f.meta?.body).length) return false;
+  f.meta = { ...f.meta, body: all.join(', ') };
+  if (!f.meta.encoding && meta.encoding) f.meta.encoding = meta.encoding;
+  if (!f.meta.sample && meta.sample) f.meta.sample = meta.sample;
+  return true;
+}
+
 /**
  * @param {string} code
  * @param {Array} rules compiled rules (see rules.js)
@@ -98,10 +111,13 @@ export function analyze(code, rules, opts = {}) {
       for (const extra of outs) {
         const value = extra?.value || raw;
         const category = extra?.category || rule.category;
-        const key = category + '\u0000' + (extra?.meta?.kind || '') + '\u0000' + value;
+        const kind = extra?.meta?.kind || '';
+        // a body field is kept once per endpoint (meta.example), so every endpoint lists its own fields
+        const key = category + '\u0000' + kind + (kind === 'body' ? '\u0000' + (extra.meta.example || '') : '') + '\u0000' + value;
         const prev = found.get(key);
         if (prev) {
           prev.hits++;
+          if (category === 'api' && extra?.meta) mergeBody(prev, extra);
           continue;
         }
         if (!starts) starts = lineStarts(text);

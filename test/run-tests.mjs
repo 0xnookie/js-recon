@@ -494,6 +494,126 @@ for (const v of [
 check(apiRes.length === 11, `no API false positives (got ${apiRes.length}: ${apiRes.filter((v) => !/\/api|admin|legacy|users/.test(v)).join(', ')})`);
 check(analyze('axios.delete("/api/x")', rules).find((f) => f.category === 'api')?.tags.includes('write'), 'state-changing method tagged "write"');
 
+console.log('\nAPI request bodies, URL variables, IDOR candidates');
+{
+  const { isIdName, pathHasId, assignmentBefore, objectFields, bodyAt } = await import('../src/request.js');
+  const { mergeBody } = await import('../src/analyzer.js');
+  const apiOf = (res, v) => res.find((f) => f.category === 'api' && f.value === v);
+  const bodyOf = (res, ep) => res.filter((f) => f.meta?.kind === 'body' && f.meta.example === ep).map((f) => f.value).join();
+
+  // jQuery click handler with the URL in a variable and a JSON.stringify body
+  const cart = `$(".add-to-cart").click(function(event) {
+        event.preventDefault();
+        let xhr = new XMLHttpRequest();
+        let url = "action.php";
+        xhr.open("POST", url, true);
+        xhr.setRequestHeader("Content-Type", "application/json");
+        xhr.onreadystatechange = function () { if (xhr.readyState === 4 && xhr.status === 200) { alert("Item added!!!") } };
+        var data = JSON.stringify({ "id": 1 });
+        xhr.send(data);
+    });`;
+  const cr = analyze(cart, rules);
+  const cartApi = apiOf(cr, 'POST action.php');
+  check(cartApi && cartApi.meta.body === 'id' && cartApi.meta.encoding === 'json' && cartApi.meta.sample === '{"id":1}', `xhr.open(m, urlVar) + send(JSON.stringify(var)) → POST action.php {id} (${JSON.stringify(cartApi?.meta)})`);
+  check(cartApi?.tags.includes('idor') && cartApi.tags.includes('write'), 'id in the body → idor + write');
+  check(cr.find((f) => f.meta?.kind === 'body' && f.value === 'id' && f.meta.example === 'POST action.php' && f.tags.includes('idor')), '"id" listed as a request body field of POST action.php');
+
+  const code = `
+const endpoint = "/api/v1/orders";
+fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ orderId: 5, coupon: "X", ...extra }) });
+function addUser(name) { const u = \`\${API}/users/invite\`; return axios.post(u, { email: name, role: "admin" }); }
+$.post("/cart/update.php", { item_id: 3, qty: 1 }, function () {});
+var saveUrl = "save.aspx";
+$.ajax({ url: saveUrl, type: "POST", data: { userId: uid, note: n }, success: cb });
+$.ajax({ url: "/api/profile", method: "PUT", contentType: "application/json", data: JSON.stringify({ displayName: d, avatar: a }) });
+const fd = new FormData(); fd.append("file", f); fd.append("folderId", 9);
+fetch("/upload/avatar", { method: "POST", body: fd });
+x.open("POST", "/legacy/login.do"); x.setRequestHeader("Content-Type","application/x-www-form-urlencoded"); x.send("user=" + u + "&pass=" + p + "&remember=1");
+axios.get("/api/search", { params: { q: term, page: 2 } });
+$.get("/api/items", { category: c });
+axios.delete("/api/v2/tokens/" + tokenId);
+const opts = { method: "PATCH", body: JSON.stringify({ status: s }) };
+fetch("/api/tickets/" + id, opts);
+$.ajax({
+  url: "/api/transfer",
+  type: "POST",
+  data: {
+    fromAccount: f,
+    amount: 100
+  }
+});
+var payload = {}; payload.accountId = acc; payload["note"] = "x";
+x2.open("POST", "/api/notes"); x2.send(JSON.stringify(payload));
+fetch("/oauth/token", { method: "POST", body: new URLSearchParams({ grant_type: "password", username: u }) });
+ky.post("/api/likes", { json: { postId: 1 } });
+api.post("/api/a", { first: 1 }); api.post("/api/a", { second: 2 });`;
+  const res = analyze(code, rules);
+  const expect = [
+    ['POST /api/v1/orders', 'orderId, coupon', 'json', '{"orderId":5,"coupon":"X"}'],
+    ['POST ${API}/users/invite', 'email, role', 'json', '{"email":"","role":"admin"}'],
+    ['POST /cart/update.php', 'item_id, qty', 'form', 'item_id=3&qty=1'],
+    ['POST save.aspx', 'userId, note', 'form', 'userId=&note='],
+    ['PUT /api/profile', 'displayName, avatar', 'json'],
+    ['POST /upload/avatar', 'file, folderId', 'multipart'],
+    ['POST /legacy/login.do', 'user, pass, remember', 'form', 'user=&pass=&remember=1'],
+    ['PATCH /api/tickets/', 'status', 'json'],
+    ['POST /api/transfer', 'fromAccount, amount', 'form', 'fromAccount=&amount=100'],
+    ['POST /api/notes', 'accountId, note', 'json'],
+    ['POST /oauth/token', 'grant_type, username', 'form', 'grant_type=password&username='],
+    ['POST /api/likes', 'postId', 'json', '{"postId":1}'],
+  ];
+  for (const [v, body, enc, sample] of expect) {
+    const f = apiOf(res, v);
+    check(f && f.meta.body === body && f.meta.encoding === enc && (!sample || f.meta.sample === sample), `${v} {${body}} ${enc}${f ? '' : ' (missing)'}${f && f.meta.body !== body ? ' got ' + f.meta.body : ''}`);
+  }
+  check(bodyOf(res, 'POST /cart/update.php') === 'item_id,qty', 'body fields are params tied to their endpoint');
+  check(apiOf(res, 'GET /api/search?q=&page=') && apiOf(res, 'GET /api/items?category='), 'axios params / $.get data → query parameters on the endpoint');
+  for (const v of ['DELETE /api/v2/tokens/', 'PATCH /api/tickets/', 'POST /upload/avatar', 'POST save.aspx', 'POST /api/v1/orders'])
+    check(apiOf(res, v)?.tags.includes('idor'), `idor: ${v}`);
+  for (const v of ['POST /oauth/token', 'GET /api/items?category=', 'POST /api/likes'.replace('likes', 'transfer')])
+    check(apiOf(res, v) && !apiOf(res, v).tags.includes('idor'), `no idor: ${v}`);
+  check(apiOf(res, 'POST /api/a')?.meta.body === 'first, second', 'same endpoint, two bodies → field names merged');
+
+  // things that must not become endpoints
+  const neg = analyze(`
+var key = "/some/path"; cache.get(key); seen.delete(key);
+function a(){ var t = "/api/secret/x"; } function b(t){ return axios.post(t, {}); }
+function c(e,t){ r.post(e,{a:t}); x.open("POST", e); fetch(e, { method: "POST" }); }
+Object.post(cfg, x);`, rules).filter((f) => f.category === 'api');
+  check(neg.length === 0, `no endpoint from Map#get, another function's variable or a parameter (got ${neg.map((f) => f.value).join(', ')})`);
+
+  check(['id', 'ID', 'userId', 'order_id', 'accountID', 'itemUuid', 'uuid', 'folder-id'].every(isIdName), 'ID-like names');
+  check(!['paid', 'valid', 'android', 'grid', 'key', 'hidden', 'Idle'].some(isIdName), 'not ID-like: paid, valid, android, key …');
+  check(pathHasId('/api/users/{id}/x') && pathHasId('/u/:userId') && pathHasId('${base}/o/${order.id}') && !pathHasId('${API_BASE}/v1/me'), 'IDs in path templates (not the base URL variable)');
+  const sc = 'var u = "/a"; function f(){ var u = "/b"; } g(u);';
+  check(sc.slice(assignmentBefore(sc, 'u', sc.lastIndexOf('u)')), sc.lastIndexOf('u)')).startsWith('"/a"'), 'variable lookup skips a closed function scope');
+  const of = objectFields('{ id, "q-x": 1, nested: { a: 1 }, fn() { return 1 }, flag: !0, s: \'x\'\n}', 0);
+  check(of && of.fields.map((f) => f.name).join() === 'id,q-x,nested,flag,s' && of.fields[3].sample === true && of.fields[1].sample === 1, 'objectFields: shorthand, quoted, nested, method, !0, multi-line');
+  check(bodyAt('\'{"a":1,"b":2}\'', 0)?.fields.map((f) => f.name).join() === 'a,b', 'JSON string body');
+
+  const merged = { meta: { body: 'a' }, tags: [] };
+  mergeBody(merged, { meta: { body: 'b, a' }, tags: ['idor'] });
+  check(merged.meta.body === 'a, b' && merged.tags.includes('idor'), 'mergeBody: union of fields and idor tag');
+
+  const { buildOpenApi, buildPostman } = await import('../src/exporters.js');
+  const model = {
+    host: 'shop.test', origin: 'https://shop.test',
+    endpoints: [
+      { method: 'POST', path: 'action.php', tags: ['write', 'idor'], body: ['id'], sample: '{"id":1}', encoding: 'json' },
+      { method: 'POST', path: '/cart/update.php', tags: ['write'], body: ['item_id', 'qty'], sample: 'item_id=3&qty=1', encoding: 'form' },
+    ],
+    bodyFields: {}, headers: [], bearer: false, graphql: {},
+  };
+  const oa = buildOpenApi(model);
+  const act = oa.paths['/action.php']?.post;
+  check(act?.requestBody.content['application/json'].schema.example.id === 1 && act.requestBody.content['application/json'].schema.properties.id.type === 'number' && act['x-jsrecon-tags'].includes('idor'),
+    'OpenAPI: body fields + example from the request code, idor tag');
+  check(oa.paths['/cart/update.php']?.post.requestBody.content['application/x-www-form-urlencoded'], 'OpenAPI: form-encoded body media type');
+  const pm = buildPostman(model);
+  check(JSON.parse(pm.item.find((i) => i.name === 'POST /action.php').request.body.raw).id === 1, 'Postman: JSON sample body');
+  check(pm.item.find((i) => i.name === 'POST /cart/update.php').request.body.urlencoded.map((p) => p.key + '=' + p.value).join('&') === 'item_id=3&qty=1', 'Postman: urlencoded body');
+}
+
 console.log('\nClient-side routes');
 const routeCode = `
 const r = createBrowserRouter([

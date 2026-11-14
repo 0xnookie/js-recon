@@ -1,7 +1,7 @@
 // Service worker: observes script loads, fetches and analyzes JavaScript, stores findings per host,
 // verifies discovered npm dependencies (dependency confusion).
 
-import { analyze } from './analyzer.js';
+import { analyze, mergeBody } from './analyzer.js';
 import { buildRules, makeSubdomainRule, packageRoot, classifyLink, INTERESTING_RE, inputFinding, apiEndpoint, analyzeMessageHandler, POSTMESSAGE_DESC } from './rules.js';
 import { observedRequest, normalizePath, orderCaptures, scriptFamily } from './requests.js';
 import { replayCandidates } from './exporters.js';
@@ -255,6 +255,12 @@ function mergeFindings(data, results, src) {
     }
     // inputs, endpoints and hosts seen by several sources keep all their tags (e.g. "cors" + "observed")
     if (TAG_MERGE.has(r.category)) for (const t of r.tags || []) if (!f.tags.includes(t)) f.tags = [...f.tags, t];
+    // the same endpoint called with other fields elsewhere; a body field sent to several endpoints
+    if (r.category === 'api' && r.meta?.body) mergeBody(f, r);
+    if (r.category === 'params' && r.meta?.example && f.meta && r.meta.example !== f.meta.example) {
+      const more = f.meta.examples || [];
+      if (!more.includes(r.meta.example) && more.length < 10) f.meta = { ...f.meta, examples: [...more, r.meta.example] };
+    }
     if (r.category === 'deps' && r.meta?.evidence) {
       const ev = new Set([...(f.meta?.evidence || []), ...r.meta.evidence]);
       if (ev.size !== (f.meta?.evidence || []).length) {

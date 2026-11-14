@@ -6,8 +6,10 @@
 //
 // Input model (built by the popup from the findings):
 //   { host, origin,
-//     endpoints: [{ method, path, tags }]            HTTP API rows; path relative, absolute or `${BASE}/…`
-//     bodyFields: { "POST /api/x": ["a", "b"] }      runtime-captured request body fields per endpoint
+//     endpoints: [{ method, path, tags,              HTTP API rows; path relative, absolute or `${BASE}/…`
+//                   body?, sample?, encoding? }]     body fields read from the request code, sample payload
+//                                                    ('{"id":1}' / 'id=1'), json | form | multipart
+//     bodyFields: { "POST /api/x": ["a", "b"] }      body fields per endpoint from the Params tab (runtime + code)
 //     headers: ["X-Tenant-Id", …]                    custom request headers (code, CORS, observed traffic)
 //     bearer: true                                   an "Authorization: Bearer …" header was seen
 //     graphql: { endpoint, operations: [{ kind, name, document }] } }
@@ -40,6 +42,27 @@ export function splitEndpoint(raw, origin) {
 }
 
 const pathParams = (path) => [...path.matchAll(/\{([^}]+)\}/g)].map((m) => m[1]);
+
+const MEDIA = { json: 'application/json', form: 'application/x-www-form-urlencoded', multipart: 'multipart/form-data' };
+
+/** Body fields of an endpoint: its own (from the request code) plus runtime-captured ones. */
+function bodyOf(e, model, method, path) {
+  return [...new Set([...(e.body || []), ...(model.bodyFields?.[`${method} ${path}`] || [])])];
+}
+
+/** The sample payload the client sends ({"id":1} or id=1&qty=), as an object; null if there is none. */
+function sampleObject(e) {
+  if (!e.sample) return null;
+  try {
+    if (e.encoding === 'form' || e.encoding === 'multipart') {
+      return Object.fromEntries([...new URLSearchParams(e.sample)]);
+    }
+    const o = JSON.parse(e.sample);
+    return o && typeof o === 'object' && !Array.isArray(o) ? o : null;
+  } catch {
+    return null;
+  }
+}
 
 function operationId(method, path, used) {
   let id = (method.toLowerCase() + path.replace(/\{([^}]+)\}/g, 'By_$1').replace(/[^A-Za-z0-9]+(.)?/g, (_, c) => (c ? c.toUpperCase() : ''))).slice(0, 100);
@@ -99,13 +122,16 @@ export function buildOpenApi(model) {
       parameters,
       responses: { default: { description: 'Not known (discovered in client-side code)' } },
     };
-    const tags = (e.tags || []).filter((t) => ['observed', 'runtime', 'interesting', 'write'].includes(t));
+    const tags = (e.tags || []).filter((t) => ['observed', 'runtime', 'interesting', 'write', 'idor'].includes(t));
     if (tags.length) op['x-jsrecon-tags'] = tags;
     if (templated) op['x-jsrecon-note'] = 'The client prefixes this path with a base URL variable';
-    const fields = model.bodyFields?.[`${method} ${path}`];
-    if (WRITE.has(method) && method !== 'DELETE') {
-      const properties = Object.fromEntries((fields || []).map((f) => [f, { type: 'string' }]));
-      op.requestBody = { required: false, content: { 'application/json': { schema: { type: 'object', properties } } } };
+    const fields = bodyOf(e, model, method, path);
+    if ((WRITE.has(method) && method !== 'DELETE') || fields.length) {
+      const sample = sampleObject(e);
+      const properties = Object.fromEntries(fields.map((f) => [f, { type: typeof sample?.[f] === 'number' ? 'number' : typeof sample?.[f] === 'boolean' ? 'boolean' : 'string' }]));
+      const schema = { type: 'object', properties };
+      if (sample) schema.example = sample;
+      op.requestBody = { required: false, content: { [MEDIA[e.encoding] || MEDIA.json]: { schema } } };
     }
     add(method, path, op, origin);
   }
@@ -157,9 +183,15 @@ export function buildPostman(model) {
     if (seen.has(key)) continue;
     seen.add(key);
     const request = { method, header, url: urlOf(origin, path, query) };
-    if (WRITE.has(method) && method !== 'DELETE') {
-      const fields = model.bodyFields?.[`${method} ${path}`] || [];
-      request.body = { mode: 'raw', raw: JSON.stringify(Object.fromEntries(fields.map((f) => [f, ''])), null, 2), options: { raw: { language: 'json' } } };
+    const fields = bodyOf(e, model, method, path);
+    if ((WRITE.has(method) && method !== 'DELETE') || fields.length) {
+      const sample = sampleObject(e) || Object.fromEntries(fields.map((f) => [f, '']));
+      if (e.encoding === 'form' || e.encoding === 'multipart') {
+        const mode = e.encoding === 'form' ? 'urlencoded' : 'formdata';
+        request.body = { mode, [mode]: fields.map((f) => ({ key: f, value: sample[f] == null ? '' : String(sample[f]), type: 'text' })) };
+      } else {
+        request.body = { mode: 'raw', raw: JSON.stringify(sample, null, 2), options: { raw: { language: 'json' } } };
+      }
     }
     item.push({ name: `${method} ${path}`, request });
   }

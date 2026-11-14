@@ -139,6 +139,18 @@ const apiParts = (f) => {
   return { method, path: f.meta?.path || f.value.slice(method.length + 1) };
 };
 
+/** Body field names of an API finding (meta.body is "a, b", from the request code or the runtime hooks). */
+const bodyFields = (meta) => String(meta?.body || '').split(', ').filter(Boolean);
+
+// What to test first: sensitive names, object IDs (IDOR), state-changing methods, known inputs, seen live
+const API_WEIGHT = { interesting: 4, idor: 3, write: 2, observed: 1, runtime: 1 };
+function apiPriority(f) {
+  let s = 0;
+  for (const t of f.tags || []) s += API_WEIGHT[t] || 0;
+  if (f.meta?.body || apiParts(f).path.includes('?')) s += 1;
+  return s;
+}
+
 // Params tab groups: everything on the client side a tester can set
 const PARAM_KINDS = {
   query: 'Query parameters',
@@ -152,7 +164,7 @@ const PARAM_KINDS = {
 const PARAM_KIND_ORDER = Object.keys(PARAM_KINDS);
 const PARAM_DESC = {
   query: 'Read from the page URL or sent in requests. Try it on the page and on the API endpoints.',
-  body: 'Top-level JSON / form field the page sends (recorded by the runtime hooks). The example shows the endpoint. Good candidates for mass assignment: add fields the UI never sends.',
+  body: 'Top-level JSON / form field the page sends: read from the request code (JSON.stringify, FormData, $.ajax data …) or recorded by the runtime hooks. The examples show the endpoints. "idor" marks object IDs: change them to another user\'s. Good candidates for mass assignment: add fields the UI never sends.',
   data: 'Read from a data-* attribute, usually on the embedding element (widget container or <script> tag). An embedder controls it.',
   form: 'Submitted by a form. Hidden fields are worth tampering with.',
   header: 'Request header set or read by the code. Custom headers often switch behaviour on the server.',
@@ -180,7 +192,7 @@ function buildModel(data) {
       if (f.meta?.key) p.meta['config key'] = f.meta.key;
       example ||= f.meta?.example;
     }
-    if (example && p.examples.length < 5 && !p.examples.includes(example)) p.examples.push(example);
+    for (const x of [example, ...(f?.meta?.examples || [])]) if (x && p.examples.length < 5 && !p.examples.includes(x)) p.examples.push(x);
     if (f && p.sources.length < 5) p.sources.push(...f.sources.slice(0, 5 - p.sources.length));
   };
   const addDomain = (host, example, extraTags = [], hits = 1, f = null) => {
@@ -228,8 +240,9 @@ function buildModel(data) {
     }
   }
   const kindRank = (p) => PARAM_KIND_ORDER.indexOf(p.kind) >>> 0; // unknown kinds last
+  const paramRank = (p) => (p.tags.includes('interesting') ? 2 : 0) + (p.tags.includes('idor') ? 1 : 0);
   m.params = [...params.values()].sort(
-    (a, b) => kindRank(a) - kindRank(b) || b.tags.includes('interesting') - a.tags.includes('interesting') || b.count - a.count || a.value.localeCompare(b.value),
+    (a, b) => kindRank(a) - kindRank(b) || paramRank(b) - paramRank(a) || b.count - a.count || a.value.localeCompare(b.value),
   );
   const has = (x, t) => (x.tags.includes(t) ? 1 : 0);
   m.domains = [...domains.values()].sort(
@@ -248,7 +261,7 @@ function buildModel(data) {
   const byInteresting = (a, b) => (b.tags?.includes('interesting') - a.tags?.includes('interesting')) || a.value.localeCompare(b.value);
   m.endpoints.sort(byInteresting);
   m.urls.sort(byInteresting);
-  m.api.sort((a, b) => (b.tags?.includes('interesting') - a.tags?.includes('interesting')) || apiParts(a).path.localeCompare(apiParts(b).path) || a.value.localeCompare(b.value));
+  m.api.sort((a, b) => apiPriority(b) - apiPriority(a) || apiParts(a).path.localeCompare(apiParts(b).path) || a.value.localeCompare(b.value));
   m.routes.sort(
     (a, b) =>
       (b.tags?.includes('interesting') - a.tags?.includes('interesting')) ||
@@ -303,7 +316,7 @@ function filtered(tab) {
     if (SEV_TABS.has(tab) && (SEV_RANK[f.severity] || 0) < minSev) return false;
     if (tab === 'secrets' && ui.hideTentative && (f.confidence === 'tentative' || f.tags?.includes('example'))) return false;
     if (ui.hideNoise && NOISE_TABS.has(tab) && f.tags?.some((t) => t === 'noise' || t === 'static')) return false;
-    if (ui.onlyInteresting && INTERESTING_TABS.has(tab) && !f.tags?.includes('interesting')) return false;
+    if (ui.onlyInteresting && INTERESTING_TABS.has(tab) && !f.tags?.some((t) => t === 'interesting' || t === 'idor')) return false;
     if (ui.onlyNew && tab !== 'files' && !f.tags?.includes('new')) return false;
     if (tab === 'files') return match(f.url + ' ' + (f.label || '') + ' ' + (f.error || ''));
     return match(f.value + ' ' + (f.label || '') + ' ' + (f.examples || []).join(' ') + ' ' + (f.tags || []).join(' '));
@@ -346,8 +359,12 @@ function srcSummary(f) {
 }
 
 const HIDDEN_CHIPS = new Set(['js', 'write']);
+const CHIP_TITLES = {
+  idor: 'Sends an object ID (path segment, body field or query parameter): try another user\'s ID (IDOR / BOLA)',
+  interesting: 'Name suggests a sensitive function (admin, upload, token, payment …)',
+};
 function chips(tags) {
-  return (tags || []).filter((t) => !HIDDEN_CHIPS.has(t)).map((t) => h('span', { class: `chip ${t}` }, t.replace(/-/g, ' ')));
+  return (tags || []).filter((t) => !HIDDEN_CHIPS.has(t)).map((t) => h('span', { class: `chip ${t}`, title: CHIP_TITLES[t] || '' }, t.replace(/-/g, ' ')));
 }
 
 function btn(label, title, fn, cls = '') {
@@ -449,8 +466,23 @@ function linkRow(f) {
   return expandable(row, f.key, () => detailFor(f));
 }
 
-function curlFor(method, url) {
-  return `curl -i -s -k -X ${method} ${shq(url)}${['POST', 'PUT', 'PATCH'].includes(method) ? " -H 'Content-Type: application/json' -d '{}'" : ''}`;
+/** curl with the body the page sends: recovered sample payload, else the field names, else {} */
+function curlFor(method, url, meta = {}) {
+  const base = `curl -i -s -k -X ${method} ${shq(url)}`;
+  const fields = bodyFields(meta);
+  if (!['POST', 'PUT', 'PATCH'].includes(method) && !fields.length) return base;
+  const enc = meta.encoding || 'json';
+  if (enc === 'multipart') {
+    const pairs = meta.sample ? meta.sample.split('&') : fields.map((n) => `${encodeURIComponent(n)}=`);
+    // --form-string, not -F: a value starting with @ or < would make curl read a local file
+    return `${base} ${pairs.map((p) => '--form-string ' + shq(decodeURIComponentSafe(p))).join(' ')}`;
+  }
+  if (enc === 'form') {
+    const body = meta.sample || fields.map((n) => `${encodeURIComponent(n)}=`).join('&');
+    return `${base} -H 'Content-Type: application/x-www-form-urlencoded' --data-raw ${shq(body)}`;
+  }
+  const body = meta.sample || JSON.stringify(Object.fromEntries(fields.map((n) => [n, ''])));
+  return `${base} -H 'Content-Type: application/json' --data-raw ${shq(body)}`;
 }
 
 /** The GraphQL endpoint the app uses: a discovered URL / endpoint containing "graphql", else /graphql. */
@@ -493,6 +525,7 @@ function apiRow(f) {
   const abs = resolveUrl(path);
   const shown = ui.absolute ? abs : path;
   const canCurl = isHttp(abs) && !abs.includes('${');
+  const fields = bodyFields(f.meta);
   const m = method.toLowerCase();
   const row = h(
     'div',
@@ -500,11 +533,12 @@ function apiRow(f) {
     head(
       h('span', { class: `method m-${m}` }, method),
       h('span', { class: 'value mono', title: shown }, shown),
+      fields.length ? h('span', { class: 'gql-fields mono', title: `Body (${f.meta?.encoding || 'json'}): ${fields.join(', ')}` }, `{ ${truncate(fields.join(', '), 60)} }`) : null,
       chips(f.tags),
       method === 'GET' ? probeChip(abs) : null,
       h('span', { class: 'spacer' }),
       srcSummary(f),
-      canCurl ? btn('curl', 'Copy as curl command', () => copy(curlFor(method, abs), 'curl command copied')) : null,
+      canCurl ? btn('curl', fields.length ? 'Copy as curl command, with the request body the page sends' : 'Copy as curl command', () => copy(curlFor(method, abs, f.meta), 'curl command copied')) : null,
       btn('Copy', 'Copy "METHOD URL"', () => copy(`${method} ${shown}`)),
     ),
   );
@@ -1104,7 +1138,8 @@ function textReport() {
     out.push(`## ${title} (${lines.length})`, ...lines, '');
   };
   section('Secrets', m.secrets.map((f) => `[${f.severity.toUpperCase()}${f.confidence ? '/' + f.confidence : ''}] ${f.label}: ${f.value}  (${f.sources.map(srcLabel).join(', ')})`));
-  section('API endpoints', m.api.map((f) => (f.meta?.graphql ? `${apiParts(f).method} ${apiParts(f).path} (GraphQL)` : `${apiParts(f).method} ${resolveUrl(apiParts(f).path)}`)));
+  const bodyNote = (f) => (f.meta?.body ? `  {${f.meta.body}}` : '') + (f.tags?.includes('idor') ? '  [idor]' : '');
+  section('API endpoints', m.api.map((f) => (f.meta?.graphql ? `${apiParts(f).method} ${apiParts(f).path} (GraphQL)` : `${apiParts(f).method} ${resolveUrl(apiParts(f).path)}${bodyNote(f)}`)));
   section('Endpoints', m.endpoints.filter((f) => !f.tags.includes('noise')).map((f) => f.value));
   section('URLs', m.urls.filter((f) => !f.tags.includes('noise')).map((f) => f.value));
   section('Domains', m.domains.map((d) => `${d.value}\t${d.tags.join(',')}`));
@@ -1130,7 +1165,10 @@ function mdReport() {
   };
   section('Secrets', m.secrets.map((f) => `- **[${f.severity}${f.confidence ? '/' + f.confidence : ''}]** ${esc(f.label)}: \`${esc(f.value)}\`${tagsOf(f)}`));
   section('DOM-XSS sinks', m.sinks.map((f) => `- ${esc(f.label)}: \`${esc(f.value)}\``));
-  section('API endpoints', m.api.map((f) => `- \`${apiParts(f).method} ${esc(f.meta?.graphql ? apiParts(f).path + ' (GraphQL)' : resolveUrl(apiParts(f).path))}\``));
+  section('API endpoints', m.api.map((f) =>
+    `- \`${apiParts(f).method} ${esc(f.meta?.graphql ? apiParts(f).path + ' (GraphQL)' : resolveUrl(apiParts(f).path))}\`` +
+    (f.meta?.body && !f.meta?.graphql ? ` — body: ${bodyFields(f.meta).map((n) => `\`${esc(n)}\``).join(', ')}` : '') +
+    (f.tags?.includes('idor') ? ' _(idor)_' : '')));
   section('Routes', m.routes.map((f) => `- \`${esc(f.value)}\`${tagsOf(f)}`));
   section('Cloud', m.cloud.map((f) => `- **[${f.severity}]** ${esc(f.label)}: \`${esc(f.value)}\``));
   section('Dependencies', m.deps.map((f) => `- **[${f.severity}]** \`${esc(f.value)}\` — ${esc(f.label)}`));
@@ -1166,16 +1204,20 @@ function endpointPaths() {
 /** Model for the OpenAPI / Postman exporters (src/exporters.js). */
 function exportModel() {
   const m = ui.model;
-  const bodyFields = {};
+  const fieldsBy = {};
   for (const p of m.params.filter((x) => x.kind === 'body')) {
-    for (const ex of p.examples) if (!(bodyFields[ex] ||= []).includes(p.value)) bodyFields[ex].push(p.value);
+    for (const ex of p.examples) if (!(fieldsBy[ex] ||= []).includes(p.value)) fieldsBy[ex].push(p.value);
   }
   const auth = m.params.filter((p) => p.kind === 'header' && /^authorization$/i.test(p.value));
   return {
     host: ui.host,
     origin: ui.data.origin,
-    endpoints: m.api.filter((f) => !f.meta?.graphql).map((f) => ({ ...apiParts(f), tags: f.tags })),
-    bodyFields,
+    endpoints: m.api.filter((f) => !f.meta?.graphql).map((f) => {
+      const p = apiParts(f);
+      const body = [...new Set([...bodyFields(f.meta), ...(fieldsBy[`${p.method} ${p.path}`] || [])])];
+      return { ...p, tags: f.tags, body, sample: f.meta?.sample, encoding: f.meta?.encoding };
+    }),
+    bodyFields: fieldsBy,
     headers: m.params.filter((p) => p.kind === 'header').map((p) => p.value),
     bearer: auth.length > 0 && !auth.some((p) => p.examples.some((e) => /^basic/i.test(e))),
     graphql: { endpoint: graphqlEndpoint(), operations: m.api.filter((f) => f.meta?.graphql && f.meta.document).map((f) => ({ kind: f.meta.method.toLowerCase(), name: f.meta.path, document: f.meta.document })) },

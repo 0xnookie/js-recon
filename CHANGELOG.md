@@ -5,6 +5,36 @@ All notable changes to **JS Recon** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.0] — 2026-11-14
+
+### Added
+- **Request bodies of API calls, read from the code.** The fields a request sends are
+  recovered statically from `JSON.stringify({…})`, object literals, `FormData.append()`,
+  `URLSearchParams`, `"a=1&b=" + x` strings and variables holding any of these, for
+  `xhr.send()`, `fetch(…, { body })`, `axios.post(url, data)`, `$.post` /
+  `$.ajax({ data })`, `new HttpRequest(m, url, body)` and `ky` / `got` (`{ json }`). API rows
+  show them inline (`POST action.php { id }`), the detail shows the encoding and a sample
+  payload, and every field is listed under Params → Request body fields with the endpoints
+  it is sent to. axios / Angular `params` and jQuery GET data become query parameters.
+- **URLs held in variables.** `let url = "action.php"; xhr.open("POST", url)`,
+  `fetch(endpoint, opts)`, `axios.post(u, data)`, `$.ajax({ url: saveUrl })` and `{ url }`
+  are resolved to the nearest assignment in the same scope (another function's variable or a
+  parameter is never used), including options objects kept in a variable.
+- **Bare server scripts as API endpoints**: `action.php`, `Save.aspx`, `login.do`, `.jsp`,
+  `.cgi`, `.ashx` … are now method-aware API rows instead of plain links only.
+- **`idor` tag** for endpoints and body fields that carry an object ID: `id`, `userId`,
+  `order_id`, `uuid`, `/users/{id}`, `/u/:userId`, `"/tokens/" + id` (not static-asset paths).
+
+### Changed
+- **The API tab is sorted by what to test first**: sensitive names, IDOR candidates,
+  state-changing methods, endpoints with known inputs, then calls seen live. *Interesting*
+  also keeps *idor* rows; Params ranks *idor* fields after *interesting* ones.
+- **curl sends the real request body**: `--data-raw '{"id":1}'` as JSON, form-encoded or
+  multipart (`--form-string`, so values are never read as local files), as the page sends it.
+- **OpenAPI / Postman exports** use the body fields from the code too, with example values,
+  number / boolean types and the page's media type (JSON, form, multipart); Postman writes
+  urlencoded / form-data bodies. Text and Markdown reports list each endpoint's body fields.
+
 ## [1.8.0] — 2026-11-12
 
 ### Changed
@@ -105,6 +135,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   response headers of the pages you visit, surfacing endpoints, API keys, secrets, source
   maps, cloud assets and other recon data, with per-host findings and report exports.
 
+[1.9.0]: https://github.com/0xnookie/js-recon/releases/tag/v1.9.0
 [1.8.0]: https://github.com/0xnookie/js-recon/releases/tag/v1.8.0
 [1.7.0]: https://github.com/0xnookie/js-recon/releases/tag/v1.7.0
 [1.6.0]: https://github.com/0xnookie/js-recon/releases/tag/v1.6.0

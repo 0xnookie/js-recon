@@ -16,6 +16,9 @@ import { graphqlAt } from './graphql.js';
 import { routeInfo } from './routes.js';
 import { taintAt } from './taint.js';
 import { enrichAwsKey, enrichGcpServiceAccount, enrichFirebaseKey } from './enrich.js';
+import {
+  urlExprAt, bodyAt, objectKeyAt, keyBody, keyString, nextArg, assignmentBefore, skipWs, skipBalanced, isIdName, pathHasId, samplePayload,
+} from './request.js';
 
 export const CATEGORY_LABELS = {
   secrets: 'Secrets',
@@ -269,9 +272,13 @@ const LINK_RE =
 const HTTP_METHODS = new Set(['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS']);
 const API_PATH_START = /^(?:(?:https?|wss?):\/\/|\/\/|\/|\.\.?\/|\$\{|[A-Za-z0-9_-]+\/)/;
 
+// a server-side script relative to the page: "action.php", "Save.aspx?x=1", "login.do"
+const SERVER_SCRIPT_RE = /^[\w.-]{1,200}\.(?:php\d?|phtml|aspx?|ashx|asmx|axd|jspx?|do|action|cgi|pl|cfm|cfc|svc)(?:[?#;][^\s]*)?$/i;
+
 function apiPath(raw) {
   const p = String(raw || '').trim();
   if (p.length < 2 || p.length > 1000 || /\s/.test(p)) return null;
+  if (SERVER_SCRIPT_RE.test(p)) return p;
   if (!API_PATH_START.test(p) || !/[a-z]/i.test(p) || !p.includes('/')) return null;
   if (p.startsWith('${') && !/^\$\{[^}]{1,80}\}\//.test(p)) return null; // only `${base}/path`, not `${a}:b`
   if (MIME_RE.test(p) || STATIC_RE.test(p) || DATE_FMT_RE.test(p) || NOISE_PATH_RE.test(p)) return null;
@@ -310,8 +317,10 @@ function apiFromCall(v, m) {
   const fetchLike = /(?:^|\.)fetch$|(?:^|\.)Request$|^\$fetch$|^ofetch$|^ky$/i.test(fn);
   if (!fetchLike && !m[5]) return null;
   const end = m.index + m[0].length;
-  const method = methodAfter(this.code, end) || (fetchLike ? 'GET' : null);
-  return method ? apiEndpoint(method, m[4], m[2]) : null;
+  const urlEnd = m[5] ? end - m[5].length : end;
+  const opts = optionsObjectAt(this.code, nextArg(this.code, urlEnd));
+  const method = (opts >= 0 && keyString(this.code, opts, /^method$/)) || methodAfter(this.code, end) || (fetchLike ? 'GET' : null);
+  return method ? withRequest(apiEndpoint(method, m[4], m[2]), fetchOptions(this.code, opts), tailAfter(this.code, urlEnd)) : null;
 }
 
 /** Text of the object literal that contains `index` (brace matching, max `max` chars each way). */
@@ -343,11 +352,249 @@ function enclosingObject(code, index, max = 600) {
 }
 
 function apiFromConfig(v, m, ctx) {
-  const obj = enclosingObject(ctx.code, ctx.index);
+  const code = ctx.code;
+  const start = enclosingObjectStart(code, ctx.index);
+  if (start < 0) return null;
+  const obj = enclosingObject(code, ctx.index);
   if (!obj) return null;
   URL_KEY_RE.lastIndex = 0;
   const u = URL_KEY_RE.exec(obj);
-  return u ? apiEndpoint(m[2] || m[4], u[3], u[1]) : null;
+  let api;
+  let tail = false;
+  if (u) {
+    api = apiEndpoint(m[2] || m[4], u[3], u[1]);
+    const after = start + u.index + u[0].length;
+    tail = /^\s*\+\s*[A-Za-z_$(]/.test(code.slice(after, after + 40));
+  } else {
+    // { url: endpoint, type: "POST" } / { url, method: "post" } — the URL is in a variable
+    const k = objectKeyAt(code, start, /^url$/);
+    const r = k && (k.shorthand ? resolveUrlVar(code, k.name, start) : urlExprAt(code, k.at));
+    if (!r) return null;
+    api = apiEndpoint(m[2] || m[4], r.path, r.prefix);
+    tail = r.dynamicTail;
+  }
+  if (!api) return null;
+  // jQuery ($.ajax: `type:`) sends a plain data object form-encoded, GET data as the query string
+  const jq = !!m[3] || /\bajax\s*\(\s*$/.test(code.slice(Math.max(0, start - 20), start));
+  const req = { encodingHint: encodingHint(obj), defaultEncoding: jq ? 'form' : 'json' };
+  const data = keyBody(code, start, /^(?:data|body|json)$/);
+  if (data && (BODY_METHODS.has(api.meta.method) || !jq)) Object.assign(req, data);
+  else if (data) req.query = data.fields.map((f) => f.name);
+  const params = keyBody(code, start, /^(?:params|query|searchParams)$/);
+  if (params) req.query = [...(req.query || []), ...params.fields.map((f) => f.name)];
+  return withRequest(api, req, tail);
+}
+
+// ── request bodies / params of API calls (src/request.js does the source scanning) ──
+
+const BODY_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+// receivers whose .get(x) / .delete(x) is an HTTP call, not Map#get / Set#delete
+const HTTP_RECEIVER_RE =
+  /(?:^|\.)(?:\$|jQuery|axios|\$axios|\$http|_?http|https?Client|api|\$api|apiClient|apiService|client|request|req|superagent|ky|got|fetcher|ajax|instance|axiosInstance)$/i;
+
+/** `this.http` in `this.http.get(` — the identifier chain right before code[idx]. */
+function receiverBefore(code, idx) {
+  const m = /([A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)\s*$/.exec(code.slice(Math.max(0, idx - 100), idx));
+  return m ? m[1].replace(/\s+/g, '') : '';
+}
+
+function encodingHint(text) {
+  const m = /content-?type["'`]?\s*[:,]\s*["'`]([^"'`]{3,100})/i.exec(text || '');
+  if (!m) return null;
+  return /json/i.test(m[1]) ? 'json' : /urlencoded/i.test(m[1]) ? 'form' : /multipart/i.test(m[1]) ? 'multipart' : null;
+}
+
+/** A variable holding the URL, resolved at the place it is used. */
+function resolveUrlVar(code, name, usedAt) {
+  const at = assignmentBefore(code, name, usedAt);
+  return at < 0 ? null : urlExprAt(code, at, 1);
+}
+
+/** Offset of the opening brace of the object literal that contains code[index], or -1. */
+function enclosingObjectStart(code, index, max = 600) {
+  let depth = 0;
+  for (let i = index - 1; i >= Math.max(0, index - max); i--) {
+    const c = code[i];
+    if (c === '}') depth++;
+    else if (c === '{') {
+      if (depth === 0) return i;
+      depth--;
+    }
+  }
+  return -1;
+}
+
+/** Options object of fetch(url, opts) / request(url, opts): the literal itself or a variable holding one. */
+function optionsObjectAt(code, i) {
+  if (i < 0) return -1;
+  i = skipWs(code, i);
+  if (code[i] === '{') return i;
+  const id = /^([A-Za-z_$][\w$]{0,40})\s*[,)]/.exec(code.slice(i, i + 50));
+  if (!id) return -1;
+  const at = assignmentBefore(code, id[1], i);
+  return at >= 0 && code[at] === '{' ? at : -1;
+}
+
+/** Body / query of a fetch-style options object: { method, body, headers, params }. */
+function fetchOptions(code, objStart) {
+  if (objStart < 0) return {};
+  const req = { encodingHint: encodingHint(code.slice(objStart, skipBalanced(code, objStart))), defaultEncoding: 'json' };
+  const body = keyBody(code, objStart, /^(?:body|data|json)$/);
+  if (body) Object.assign(req, body);
+  const params = keyBody(code, objStart, /^(?:params|query|searchParams)$/);
+  if (params) req.query = params.fields.map((f) => f.name);
+  return req;
+}
+
+/** axios.post(url, data, cfg) / $.post(url, data) / http.get(url, { params }) → body and query of the call. */
+function callArguments(code, afterUrl, method, recv) {
+  const a2 = nextArg(code, afterUrl);
+  if (a2 < 0) return {};
+  // ky / got take an options object ({ json, body, searchParams }) as the second argument
+  if (/(?:^|\.)(?:ky|got)$/.test(recv)) return fetchOptions(code, optionsObjectAt(code, a2));
+  const jq = /^(?:\$|jQuery)$/.test(recv);
+  const req = { defaultEncoding: jq ? 'form' : 'json' };
+  if (method === 'POST' || method === 'PUT' || method === 'PATCH') {
+    const body = bodyAt(code, a2);
+    if (body) Object.assign(req, body);
+    const cfg = optionsObjectAt(code, nextArg(code, a2));
+    if (cfg >= 0) {
+      req.encodingHint = encodingHint(code.slice(cfg, skipBalanced(code, cfg)));
+      const params = keyBody(code, cfg, /^params$/);
+      if (params) req.query = params.fields.map((f) => f.name);
+    }
+    return req;
+  }
+  if (jq) {
+    // $.get(url, { q: 1 }) / $.getJSON(url, data): the data object becomes the query string
+    const data = bodyAt(code, a2);
+    if (data) req.query = data.fields.map((f) => f.name);
+    return req;
+  }
+  const cfg = optionsObjectAt(code, a2);
+  if (cfg < 0) return req;
+  const params = keyBody(code, cfg, /^params$/);
+  if (params) req.query = params.fields.map((f) => f.name);
+  const data = method === 'DELETE' && keyBody(code, cfg, /^data$/); // axios.delete(url, { data })
+  if (data) Object.assign(req, data);
+  return req;
+}
+
+/** xhr.open(m, url) … xhr.send(body), new HttpRequest(m, url, body) */
+function xhrRequest(code, openIdx, afterUrl) {
+  if (!code.startsWith('.open', openIdx)) {
+    const a3 = nextArg(code, afterUrl);
+    return a3 < 0 ? {} : { ...(bodyAt(code, a3) || {}), defaultEncoding: 'json' };
+  }
+  const recv = receiverBefore(code, openIdx);
+  if (!recv || recv.length > 60) return {};
+  const name = recv.replace(/[$]/g, '\\$').replace(/\./g, '\\s*\\.\\s*');
+  const win = code.slice(afterUrl, afterUrl + 3000);
+  const send = new RegExp(`(?<![\\w$.])${name}\\s*\\.\\s*send\\(\\s*`).exec(win);
+  if (!send) return {};
+  const reopen = new RegExp(`(?<![\\w$.])${name}\\s*\\.\\s*open\\(`).exec(win);
+  if (reopen && reopen.index < send.index) return {};
+  const at = afterUrl + send.index + send[0].length;
+  const req = { encodingHint: encodingHint(win.slice(0, send.index)) };
+  if (code[at] !== ')') Object.assign(req, bodyAt(code, at) || {});
+  return req;
+}
+
+/**
+ * API finding + what the request carries: body fields (meta.body / encoding / sample), query names from a
+ * params object (appended as ?a=&b=, like observed requests), an "idor" tag when an object id is sent,
+ * and one "Request body field" params finding per field, tied to the endpoint by meta.example.
+ */
+function withRequest(api, req = {}, dynamicTail = false) {
+  if (!api) return null;
+  const out = [api];
+  const query = [...new Set((req.query || []).filter((n) => PARAM_NAME_RE.test(n)))].slice(0, 40);
+  if (query.length) {
+    const [p, q = ''] = api.meta.path.split('?');
+    const names = [...new Set([...q.split('&').map((x) => x.split('=')[0]).filter(Boolean), ...query])];
+    api.meta.path = `${p}?${names.map((n) => `${n}=`).join('&')}`;
+    api.value = `${api.meta.method} ${api.meta.path}`;
+  }
+  const fields = (req.fields || []).filter((f) => PARAM_NAME_RE.test(f.name) && !NOT_A_NAME.has(f.name.toLowerCase()));
+  const encoding = req.encoding || req.encodingHint || (fields.length ? req.defaultEncoding || 'json' : null);
+  if (fields.length) {
+    api.meta.body = fields.map((f) => f.name).join(', ');
+    api.meta.sample = samplePayload(fields, encoding);
+  }
+  if (encoding && (fields.length || req.encoding)) api.meta.encoding = encoding;
+  const [path, qs = ''] = api.meta.path.split('?');
+  const queryNames = qs.split('&').map((x) => x.split('=')[0]);
+  if (
+    pathHasId(path) ||
+    // "/api/tokens/" + id — but not "/_next/static/" + buildId or "/assets/" + file
+    (dynamicTail && !qs && /\/$/.test(path) && !ASSET_DIR_RE.test(path)) ||
+    fields.some((f) => isIdName(f.name)) ||
+    queryNames.some(isIdName)
+  ) api.tags.push('idor');
+  for (const f of fields) {
+    const p = inputFinding('body', f.name);
+    if (!p) continue;
+    p.meta.example = api.value;
+    if (isIdName(f.name)) p.tags.push('idor');
+    out.push({ ...p, category: 'params', label: 'Request body field' });
+  }
+  return out;
+}
+
+const ASSET_DIR_RE = /\/(?:_next|static|assets?|build|dist|public|images?|img|icons?|fonts?|locales?|i18n|lang|translations?|cdn|media|js|css|chunks?)\//i;
+const httpMethod = (w) => (w === 'getJSON' ? 'GET' : w === 'del' ? 'DELETE' : String(w).toUpperCase());
+const tailAfter = (code, i) => /^\s*\+\s*[A-Za-z_$(]/.test(code.slice(i, i + 40));
+
+/** api-call: axios.post("/x", data), $.get("/x", { q }), http.put(base + "/x", body) */
+function apiFromMethodCall(v, m, ctx) {
+  const method = httpMethod(m[1]);
+  const api = apiEndpoint(method, m[4], m[2]);
+  if (!api) return null;
+  const end = m.index + m[0].length;
+  return withRequest(api, callArguments(ctx.code, end, method, receiverBefore(ctx.code, m.index)), tailAfter(ctx.code, end));
+}
+
+/** api-call-var: axios.post(url, data) / $.post(endpoint, data) where the URL is in a variable */
+function apiFromMethodCallVar(v, m, ctx) {
+  const method = httpMethod(m[1]);
+  const recv = receiverBefore(ctx.code, m.index);
+  if (!BODY_METHODS.has(method) || method === 'DELETE') {
+    if (m[1] !== 'getJSON' && !HTTP_RECEIVER_RE.test(recv)) return null; // Map#get(key), Set#delete(x)
+  } else if (/^(?:Object|Reflect|Array|Promise|Math|JSON|console)$/.test(recv)) {
+    return null;
+  }
+  const at = m.index + m[0].lastIndexOf(m[2]);
+  const u = resolveUrlVar(ctx.code, m[2], at);
+  const api = u && apiEndpoint(method, u.path, u.prefix);
+  if (!api) return null;
+  return withRequest(api, callArguments(ctx.code, at + m[2].length, method, recv), u.dynamicTail);
+}
+
+/** api-xhr: xhr.open("POST", "/x") … xhr.send(body) */
+function apiFromXhr(v, m, ctx) {
+  const api = apiEndpoint(m[2], m[5], m[3]);
+  if (!api) return null;
+  const end = m.index + m[0].length;
+  return withRequest(api, xhrRequest(ctx.code, m.index, end), tailAfter(ctx.code, end));
+}
+
+/** api-xhr-var: let url = "action.php"; xhr.open("POST", url); xhr.send(JSON.stringify({ id: 1 })) */
+function apiFromXhrVar(v, m, ctx) {
+  const at = m.index + m[0].lastIndexOf(m[3]);
+  const u = resolveUrlVar(ctx.code, m[3], at);
+  const api = u && apiEndpoint(m[2], u.path, u.prefix);
+  if (!api) return null;
+  return withRequest(api, xhrRequest(ctx.code, m.index, at + m[3].length), u.dynamicTail);
+}
+
+/** api-fetch-var: fetch(url, { method: "POST", body }) / new Request(endpoint, opts) */
+function apiFromFetchVar(v, m, ctx) {
+  const at = m.index + m[0].lastIndexOf(m[1]);
+  const u = resolveUrlVar(ctx.code, m[1], at);
+  if (!u) return null;
+  const opts = optionsObjectAt(ctx.code, nextArg(ctx.code, at));
+  const method = (opts >= 0 && keyString(ctx.code, opts, /^method$/)) || 'GET';
+  return withRequest(apiEndpoint(method, u.path, u.prefix), fetchOptions(ctx.code, opts), u.dynamicTail);
 }
 
 // ── dependencies (npm) ──
@@ -982,15 +1229,27 @@ export const RULES = [
   // axios.post("/x"), http.get<T>(`${base}/x`), $.post(url), router.delete("/x"), api.patch(base + "/x")
   rule('api-call', 'API call', A, 'info',
     /\.(get|post|put|delete|patch|head|options|getJSON|del)\s*(?:<[^<>()]{0,80}>)?\s*\(\s*(?:([A-Za-z_$][\w.$]{0,60})\s*\+\s*)?(["'`])([^"'`\s]{1,1000})\3/g,
-    { group: 4, post: (v, m) => apiEndpoint(m[1] === 'getJSON' ? 'GET' : m[1] === 'del' ? 'DELETE' : m[1], m[4], m[2]) }),
+    { group: 4, post: apiFromMethodCall }),
+  // const url = "/api/cart"; axios.post(url, { id }) / $.post(endpoint, data)
+  rule('api-call-var', 'API call', A, 'info',
+    /\.(get|post|put|delete|patch|getJSON|del)\s*(?:<[^<>()]{0,80}>)?\s*\(\s*([A-Za-z_$][\w$]{0,40})\s*(?=[,)])/g,
+    { group: 2, post: apiFromMethodCallVar }),
   // fetch("/x", { method: "POST" }), new Request(...), request("/x", { method: "PUT" })
   rule('api-fetch', 'API call', A, 'info',
     /\b([\w$.]{1,60})\(\s*(?:([A-Za-z_$][\w.$]{0,60})\s*\+\s*)?(["'`])([^"'`\s]{1,1000})\3(\s*,\s*\{)?/g,
     { group: 4, post(v, m, ctx) { return apiFromCall.call(ctx, v, m); } }),
-  // xhr.open("POST", "/x"), new HttpRequest("PUT", "/x")
+  // const url = "/api/x"; fetch(url, { method: "POST", body: JSON.stringify(data) })
+  rule('api-fetch-var', 'API call', A, 'info',
+    /(?:(?<![\w$])|\.)(?:fetch|\$fetch|ofetch|ky|Request)\(\s*([A-Za-z_$][\w$]{0,40})\s*(?=[,)])/g,
+    { group: 1, post: apiFromFetchVar }),
+  // xhr.open("POST", "/x") … xhr.send(body), new HttpRequest("PUT", "/x", body)
   rule('api-xhr', 'API call', A, 'info',
     /(?:\.open|\bHttpRequest)\(\s*(["'`])([A-Za-z]{3,7})\1\s*,\s*(?:([A-Za-z_$][\w.$]{0,60})\s*\+\s*)?(["'`])([^"'`\s]{1,1000})\4/g,
-    { group: 5, post: (v, m) => apiEndpoint(m[2], m[5], m[3]) }),
+    { group: 5, post: apiFromXhr }),
+  // let url = "action.php"; xhr.open("POST", url) … xhr.send(JSON.stringify({ id: 1 }))
+  rule('api-xhr-var', 'API call', A, 'info',
+    /(?:\.open|\bHttpRequest)\(\s*(["'`])([A-Za-z]{3,7})\1\s*,\s*([A-Za-z_$][\w$]{0,40})\s*(?=[,)])/g,
+    { group: 3, post: apiFromXhrVar }),
   // $.ajax({ type: "POST", url: "/x" }), axios({ method: "put", url: "/x" })
   rule('api-config', 'API call', A, 'info',
     /\bmethod\s*:\s*(["'`])(get|post|put|delete|patch|GET|POST|PUT|DELETE|PATCH)\1|\btype\s*:\s*(["'`])(GET|POST|PUT|DELETE|PATCH)\3/g,

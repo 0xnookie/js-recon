@@ -1551,6 +1551,11 @@ a.value {
   --c: var(--medium);
 }
 
+/* sends an object ID: IDOR / BOLA candidate */
+.chip.idor {
+  --c: var(--high);
+}
+
 .chip.same-site,
 .chip.on-npm,
 .chip.conf.certain,
