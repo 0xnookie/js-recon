@@ -942,6 +942,82 @@ console.log('\nSubdomains: certificate transparency, live-check fingerprints, hi
   check(rateHost('jenkins.acme.com', 'acme.com', { status: 403, product: 'Jenkins' }).reasons.join('|') === 'CI/CD / source code (jenkins)|answers as Jenkins|protected (403)', 'reasons say why');
 }
 
+console.log('\nProgram scope: import, matching');
+{
+  const { parseScope, compileScope, hostScope, urlScope, normalizePattern } = await import('../src/scope.js');
+  check(
+    JSON.stringify(['https://Acme.com/', '.acme.com', 'app.acme.com:8443/x/*', 'config.json', 'com.acme.android', '300.1.1.1', '10.0.0.0/24'].map(normalizePattern)) ===
+      JSON.stringify(['acme.com', '*.acme.com', 'app.acme.com:8443/x', null, null, null, '10.0.0.0/24']),
+    'patterns normalised; file names, app ids and bad IPs rejected',
+  );
+  const text = parseScope('In Scope\nDomain\t*.acme.com\tCritical\nhttps://app.acme.io/api\tWeb\nQuestions: security@acme.org. Node.js apps welcome.\nOut of Scope\nblog.acme.com\nhttps://app.acme.io/api/legacy\n- status.acme.com\n');
+  check(
+    text.format === 'text' && text.in.join() === '*.acme.com,app.acme.io/api' && text.out.join() === 'blog.acme.com,app.acme.io/api/legacy,status.acme.com',
+    `text: "In / Out of scope" headings, e-mail and "Node.js" ignored (in: ${text.in.join(' ')})`,
+  );
+  const minus = parseScope('*.acme.com\n!admin.acme.com\n+ partner.acme.net');
+  check(minus.in.join() === '*.acme.com,partner.acme.net' && minus.out.join() === 'admin.acme.com', '"!" / "-" lines are out of scope, "+" in');
+  const csv = parseScope('identifier,asset_type,instruction,eligible_for_bounty,eligible_for_submission\n*.acme.com,WILDCARD,"Main, all subs",true,true\nblog.acme.com,URL,,false,false\ncom.acme.android,GOOGLE_PLAY_APP_ID,,true,true\n"api.acme.com, www.acme.com",URL,,true,true\n');
+  check(csv.format === 'hackerone-csv' && csv.in.join() === '*.acme.com,api.acme.com,www.acme.com' && csv.out.join() === 'blog.acme.com' && csv.skipped.includes('com.acme.android'), 'HackerOne CSV: ineligible → out, app ids skipped, quoted lists split');
+  const burp = parseScope(JSON.stringify({ target: { scope: { include: [{ enabled: true, host: String.raw`^(.*\.)?acme\.com$` }, { enabled: true, host: String.raw`^.*\.acme\.io$`, port: '^443$' }, { enabled: false, host: 'off.example' }], exclude: [{ enabled: true, host: String.raw`^blog\.acme\.com$` }] } } }));
+  check(burp.format === 'burp' && burp.in.join() === 'acme.com,*.acme.com,*.acme.io:443' && burp.out.join() === 'blog.acme.com', `Burp JSON: host regexes converted (${burp.in.join(' ')})`);
+  const sc = compileScope(['*.acme.com', 'app.acme.io/api', 'api-*.acme.net', '10.1.2.0/24', 'admin.acme.org:8443'], ['blog.acme.com', 'app.acme.io/api/legacy']);
+  const hs = (x) => hostScope(sc, x);
+  check(hs('x.acme.com') === 'in' && hs('a.b.acme.com') === 'in' && hs('acme.com') === 'unlisted', '*.acme.com: every subdomain at any depth, not the apex');
+  check(hs('blog.acme.com') === 'out' && hs('app.acme.io') === 'in', 'out of scope wins; a path-limited entry still puts the host in scope');
+  check(hs('api-eu.acme.net') === 'in' && hs('api.acme.net') === 'unlisted' && hs('10.1.2.77') === 'in' && hs('10.1.3.1') === 'unlisted', 'label wildcards and IPv4 ranges');
+  check(hs('admin.acme.org:8443') === 'in' && hs('admin.acme.org:9000') === 'unlisted' && hs('admin.acme.org') === 'unlisted', 'a port in the pattern must match');
+  const us = (u) => urlScope(sc, u);
+  check(us('https://app.acme.io/api/users') === 'in' && us('https://app.acme.io/api/legacy/x') === 'out' && us('https://app.acme.io/apiv2') === 'unlisted' && us('https://app.acme.io/') === 'unlisted', 'URL checks honour path prefixes on both lists');
+  check(hostScope(compileScope([], []), 'x.acme.com') === null && urlScope(compileScope(), 'https://x') === null, 'no scope set → null (callers fall back to the old rules)');
+}
+
+console.log('\nKnown-vulnerable libraries (retire.js data)');
+{
+  const { detectLibraries, vulnsFor, isAtOrAbove, fixedIn, libraryFindings, licenseFileRef, requiredLiteral, cleanVersion } = await import('../src/libs.js');
+  const { VULNDB } = await import('../src/vulndb.js');
+  check(VULNDB.length > 50 && VULNDB.every((l) => l.name && Array.isArray(l.vulns) && l.vulns.every((v) => v.length === 6 && v[1])), `bundled data: ${VULNDB.length} libraries, ${VULNDB.reduce((n, l) => n + l.vulns.length, 0)} advisories`);
+  check(isAtOrAbove('1.0.0', '1.0.0-beta') && !isAtOrAbove('1.0.0-beta', '1.0.0') && isAtOrAbove('3.10.0', '3.5.0') && !isAtOrAbove('3.4.1', '3.5.0') && isAtOrAbove('2.0', '2.0.0'), 'version order: numeric parts, pre-releases below releases');
+  check(cleanVersion('3.4.1.min') === '3.4.1' && cleanVersion('1.2.3-') === '1.2.3' && cleanVersion('abc') === null, 'versions cleaned (".min", trailing separators)');
+  check(requiredLiteral(String.raw`/\*!? jQuery v(§§version§§)`) === ' jQuery v' && requiredLiteral('(a|b)x') === '' && requiredLiteral('a|bcd') === '', 'pre-filter literal taken from the pattern');
+  const one = (code, url) => detectLibraries(code, url).map((d) => `${d.name} ${d.version} ${d.via}`).join(' | ');
+  check(one('/*! jQuery v3.4.1 | (c) JS Foundation */') === 'jquery 3.4.1 content', 'jQuery banner');
+  check(one('', 'https://cdnjs.cloudflare.com/ajax/libs/lodash.js/4.17.15/lodash.min.js') === 'lodash 4.17.15 url', 'lodash from a cdnjs URL');
+  check(one('', 'https://code.jquery.com/jquery-1.12.4.min.js') === 'jquery 1.12.4 file name', 'jQuery from its file name (".min" dropped)');
+  check(one('/**\n * @license AngularJS v1.5.8\n */') === 'angularjs 1.5.8 content', 'AngularJS banner');
+  const v = vulnsFor('jquery', '3.4.1');
+  check(v.length === 2 && v.some((x) => x.ids.includes('CVE-2020-11022')) && fixedIn(v) === '3.5.0' && !vulnsFor('jquery', '3.5.0').length, 'jQuery 3.4.1: CVE-2020-11022 / 11023, fixed in 3.5.0; 3.5.0 clean');
+  const f = libraryFindings('var a;\n/*! jQuery v1.12.4 */', '')[0];
+  check(f?.category === 'deps' && f.meta.kind === 'library' && f.rule === 'vulnerable-library' && f.value === 'jquery 1.12.4' && f.line === 2 && f.ctx?.[1] === '1.12.4' && f.meta['fixed in'] === '3.5.0', `finding: deps / library, line ${f?.line}, ${f?.meta?.advisories} advisories, worst ${f?.severity}`);
+  check(libraryFindings('/** @license React v16.13.1\n * react-dom.production.min.js */')[0]?.severity === 'info', 'a version without advisories is listed as info');
+  const ng = libraryFindings('/**\n * @license AngularJS v1.5.8\n */')[0];
+  check(ng?.meta.eol === true && /end of life/.test(ng.meta['fixed in']), 'AngularJS 1.x: no fixed release (end of life), not "fixed in 1.999"');
+  check(licenseFileRef('/*! For license information please see main.4f2a.js.LICENSE.txt */\n!function(){}', 'https://app.acme.com/static/js/main.4f2a.js') === 'https://app.acme.com/static/js/main.4f2a.js.LICENSE.txt' && licenseFileRef('var a', 'https://x/y.js') === null, '.LICENSE.txt reference resolved next to the bundle');
+}
+
+console.log('\nProgram view: merging in-scope hosts');
+{
+  const { mergeHosts, triageTargets, PROGRAM } = await import('../ui/program.js');
+  const fnd = (category, value, extra = {}) => ({ key: `${category}|${value}`, category, value, label: category, rule: category, severity: 'info', tags: [], sources: [{ file: 'f.js', line: 1 }], hits: 1, ...extra });
+  const a = { host: 'app.acme.com', origin: 'https://app.acme.com', updated: 2, files: { 'https://app.acme.com/a.js': {} }, findings: {}, triage: { 'secrets|AKIA1': { s: 'reported', at: 1 } } };
+  const b = { host: 'api.acme.com', origin: 'https://api.acme.com', updated: 3, files: { 'https://api.acme.com/b.js': {} }, findings: {}, triage: { 'secrets|AKIA1': { s: 'reported', at: 1 }, 'domain|cdn.acme.com': { s: 'reviewed', at: 5 } } };
+  for (const [d, sev] of [[a, 'high'], [b, 'critical']]) {
+    for (const f of [fnd('secrets', 'AKIA1', { severity: sev }), fnd('endpoints', '/api/users'), fnd('api', 'GET /v1/me', { meta: { method: 'GET', path: '/v1/me' } }), fnd('subdomains', 'cdn.acme.com')]) d.findings[f.key] = f;
+  }
+  b.findings['secrets|AKIA2'] = fnd('secrets', 'AKIA2');
+  a.findings['secrets|AKIA2'] = fnd('secrets', 'AKIA2');
+  a.triage['secrets|AKIA2'] = { s: 'fp', at: 1 };
+  const m = mergeHosts([{ host: 'app.acme.com', data: a }, { host: 'api.acme.com', data: b }]);
+  check(m.host === PROGRAM && m.program && m.hosts.join() === 'api.acme.com,app.acme.com' && Object.keys(m.files).length === 2 && m.updated === 3, 'hosts, files and timestamps merged');
+  check(m.findings['endpoints|https://app.acme.com/api/users'] && m.findings['endpoints|https://api.acme.com/api/users'] && !m.findings['endpoints|/api/users'], 'relative endpoints made absolute per host, so they stay apart');
+  check(m.findings['api|GET https://api.acme.com/v1/me']?.meta.path === 'https://api.acme.com/v1/me', 'API paths made absolute too');
+  const s1 = m.findings['secrets|AKIA1'];
+  check(s1?.hosts.length === 2 && s1.origKeys.length === 2 && s1.severity === 'critical' && s1.hits === 2, 'the same secret on two hosts is one row: both hosts, highest severity, hits added');
+  check(m.triage['secrets|AKIA1']?.s === 'reported' && !m.triage['secrets|AKIA2'] && m.triage['domain|cdn.acme.com']?.s === 'reviewed', 'triaged when every host agrees; one open copy keeps it open');
+  const tt = triageTargets([s1, { key: 'param|query|q' }], m.hosts);
+  check(tt.length === 2 && tt.every((x) => x.keys.includes('secrets|AKIA1') && x.keys.includes('param|query|q')), 'triage writes go back to each host (derived rows to all)');
+}
+
 console.log('\nPerformance');
 let big = '';
 const chunk = fixture + negatives + 'function a(e,t){return e.map(function(n){return n.id+"/"+t})}var o={a:1,b:"/x/y",c:[1,2,3]};'.repeat(50);
@@ -952,6 +1028,13 @@ const t0 = performance.now();
 const pr = analyze(big, buildRules({ ruleOverrides: Object.fromEntries(RULES.filter((r) => r.category === 'sinks').map((r) => [r.id, true])) }));
 const ms = performance.now() - t0;
 check(ms < 8000, `6 MB single-line bundle, all rules incl. sinks: ${ms.toFixed(0)} ms, ${pr.length} unique findings`);
+{
+  const { libraryFindings } = await import('../src/libs.js');
+  const t1 = performance.now();
+  const lf = libraryFindings(big + '/*! jQuery v3.4.1 */', 'https://app.example.com/static/main.js');
+  const ms2 = performance.now() - t1;
+  check(ms2 < 2500 && lf.some((x) => x.value === 'jquery 3.4.1'), `6 MB bundle, library version detection: ${ms2.toFixed(0)} ms`);
+}
 
 console.log(failures ? `\n${failures} check(s) failed` : '\nAll checks passed');
 process.exit(failures ? 1 : 0);

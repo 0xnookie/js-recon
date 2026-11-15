@@ -46,6 +46,7 @@
           <label class="opt"><input type="checkbox" data-key="runtimeHooks" /><div><b>Runtime hooks (opt-in)</b><span>Inject a small script into pages (in scope only) to record the parameter, storage and cookie names the code really uses, request body fields and every postMessage handler. Runs in the page's own context; reload the page after enabling.</span></div></label>
           <label class="opt"><input type="checkbox" data-key="waybackAuto" /><div><b>Wayback Machine for new hosts (opt-in)</b><span>Fetch historical JS and source maps of every newly scanned host from web.archive.org (sends the host name there). Max <input type="number" data-key="waybackLimit" min="1" max="2000" /> files per lookup. Also available on demand under Export.</span></div></label>
           <label class="opt"><input type="checkbox" data-key="crawlJs" /><div><b>Crawl referenced JS</b><span>Fetch same-site .js files mentioned in scanned code (lazy chunks, admin bundles). Max <input type="number" data-key="crawlLimit" min="1" max="2000" /> per host.</span></div></label>
+          <label class="opt"><input type="checkbox" data-key="checkLibraries" /><div><b>Known-vulnerable libraries</b><span>Find library versions (jQuery, AngularJS, DOMPurify, lodash, Bootstrap, Vue, Next.js …) in banners, version strings, script URLs and the bundle's <code>.LICENSE.txt</code>, and match them against the bundled retire.js advisory list. Offline: nothing is sent anywhere.</span></div></label>
           <label class="opt"><input type="checkbox" data-key="checkNpm" /><div><b>Dependency-confusion check</b><span>Look up discovered npm package names and scopes on registry.npmjs.org. A name missing from the public registry is reported as critical. This sends the package names to npm.</span></div></label>
           <label class="opt"><input type="checkbox" data-key="firstPartyOnly" /><div><b>First-party scripts only</b><span>Ignore scripts served from other sites (CDNs, widgets).</span></div></label>
           <label class="opt"><input type="checkbox" data-key="notify" /><div><b>Desktop notifications</b><span>Notify when a new high-severity secret is found.</span></div></label>
@@ -71,6 +72,33 @@
           <label>Ignored script hosts</label>
           <textarea data-key="ignoreScriptHosts" data-list spellcheck="false" style="min-height: 120px"></textarea>
           <small>Scripts served from these hosts are skipped (analytics, ads, consent banners …). <button type="button" class="mini" id="resetIgnore">Reset to defaults</button></small>
+        </div>
+      </section>
+
+      <section class="card" id="programScope">
+        <h2>Program scope</h2>
+        <p>The scope of the bug-bounty program you're testing. When it is set, <b>active checks only go to what it lists</b>: the subdomain live check, “Check which endpoints are live”, “Send GET URLs to proxy” and source-map guessing. A host on neither list counts as out of scope. Out-of-scope hosts are greyed in the Domains tab, and the host menu gets an <i>All in-scope hosts</i> view that merges every scanned in-scope host into one list and one report.</p>
+        <p><code>*.acme.com</code> = every subdomain (not <code>acme.com</code> itself) · <code>acme.com</code> = only that host · <code>api-*.acme.com</code> · <code>app.acme.com:8443</code> · <code>https://acme.com/api</code> (paths count for URL checks) · <code>10.0.0.0/24</code>. Out of scope wins.</p>
+        <div class="field scope-import">
+          <label>Import from the program page</label>
+          <textarea id="scopePaste" spellcheck="false" placeholder="Paste the scope table (HackerOne, Bugcrowd, Intigriti, YesWeHack — the “In scope” / “Out of scope” headings are understood), HackerOne's scope CSV, or Burp's project-options JSON. Lines starting with - or ! are out of scope."></textarea>
+          <div class="row-actions">
+            <button type="button" class="btn primary" id="scopeImport">Add to scope</button>
+            <button type="button" class="btn ghost" id="scopeReplace">Replace scope</button>
+            <button type="button" class="btn ghost danger" id="scopeClear">Clear scope</button>
+            <span id="scopeMsg" class="muted"></span>
+          </div>
+        </div>
+        <div class="opt-grid" style="margin-top: 12px">
+          <div class="field"><label>In scope</label><textarea data-key="scopeIn" data-list spellcheck="false" placeholder="*.acme.com&#10;api.acme.io&#10;https://partners.acme.net/portal"></textarea></div>
+          <div class="field"><label>Out of scope</label><textarea data-key="scopeOut" data-list spellcheck="false" placeholder="blog.acme.com&#10;status.acme.com"></textarea></div>
+        </div>
+        <div class="opt-grid" style="margin-top: 12px">
+          <label class="opt"><input type="checkbox" data-key="scopeAutoScan" /><div><b>Scan in-scope sites without asking</b><span>In “Ask before scanning” mode, sites the scope lists are scanned like allow-listed ones. Everything else still asks.</span></div></label>
+        </div>
+        <div class="scope-test">
+          <input id="scopeTestInput" type="text" spellcheck="false" placeholder="Test a host or URL — e.g. https://blog.acme.com/x" />
+          <span id="scopeTestResult" class="muted"></span>
         </div>
       </section>
 

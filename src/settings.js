@@ -36,12 +36,17 @@ export const DEFAULT_SETTINGS = {
   maxFileSizeMB: 15,
   concurrency: 4,
   checkNpm: true, // verify discovered package names against registry.npmjs.org (dependency confusion)
+  checkLibraries: true, // library versions → known advisories (bundled retire.js data, offline)
   notify: false, // desktop notification on new critical / high-severity findings
   // 'ask' (nothing is scanned until you OK the site from the popup) | 'active' (only the tab in front)
   // | 'all' (every open tab) | 'allowlist'
   scopeMode: 'ask',
   allowHosts: [],
   denyHosts: [],
+  // program scope (Settings → Program scope): when set, active checks only go to in-scope hosts / URLs
+  scopeIn: [], // "*.acme.com", "app.acme.io", "https://acme.com/api", "10.0.0.0/24"
+  scopeOut: [],
+  scopeAutoScan: false, // "ask" mode: scan in-scope sites without asking
   ignoreScriptHosts: DEFAULT_IGNORED_SCRIPT_HOSTS,
   ruleOverrides: {}, // { ruleId: true|false }
   customRules: '',

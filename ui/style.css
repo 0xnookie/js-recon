@@ -2031,3 +2031,130 @@ body.options {
     grid-template-columns: 1fr;
   }
 }
+
+/* ── program scope ── */
+.chip.scope-in {
+  --c: var(--ok);
+}
+.chip.scope-out,
+.chip.out-of-scope {
+  --c: var(--critical);
+}
+.chip.scope-unlisted {
+  --c: var(--medium);
+}
+.chip.not-in-scope {
+  --c: var(--muted);
+}
+.topbar #scopeChip {
+  flex: none;
+}
+.empty > .chip {
+  margin-top: 2px;
+}
+/* out of scope / not listed: still shown, but greyed */
+.row.oos > .row-head {
+  opacity: 0.55;
+}
+
+/* ── triage: reviewed / reported / false positive ── */
+.chip.triage {
+  --c: var(--text-2);
+}
+.chip.triage.t-reported {
+  --c: var(--blue);
+}
+.chip.triage.t-fp {
+  --c: var(--muted);
+  text-decoration: line-through;
+}
+.row.triaged:not(.open) > .row-head > :not(.chip.triage):not(button),
+.row.triaged:not(.open) > .value {
+  opacity: 0.6;
+}
+.row.t-fp:not(.open) .value {
+  text-decoration: line-through;
+  text-decoration-color: var(--muted);
+}
+.row button.mini.triage-quick {
+  min-width: 26px;
+  justify-content: center;
+}
+.triage-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.triage-bar .muted {
+  margin-right: 4px;
+}
+#triageFilter {
+  flex: none;
+}
+
+/* ── known-vulnerable libraries ── */
+.chip.vulnerable {
+  --c: var(--high);
+}
+.chip.library {
+  --c: var(--muted);
+}
+.advisories {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 320px;
+  overflow: auto;
+  padding: 8px 11px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.advisory {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.advisory .pill {
+  margin-top: 1px;
+}
+.advisory-body {
+  flex: 1;
+  min-width: 0;
+  color: var(--text);
+}
+.advisory-body .mono {
+  font-size: 11px;
+  word-break: break-all;
+}
+a.mini-link {
+  flex: none;
+  font-size: 11px;
+  color: var(--text-2);
+}
+a.mini-link:hover {
+  color: var(--text);
+}
+
+/* Settings → Program scope */
+.scope-import textarea {
+  min-height: 90px;
+}
+.scope-test {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+.scope-test input {
+  flex: 0 1 300px;
+}
+
+/* in the program scope: the status dot turns green (out of scope / not listed get a chip instead) */
+.status.in-scope:not(.busy)::before {
+  background: var(--ok);
+}

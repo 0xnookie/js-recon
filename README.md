@@ -22,7 +22,7 @@ JS Recon
 [![Bundlers](https://img.shields.io/badge/Lazy%20chunks-webpack%20%7C%20Next.js%20%7C%20Vite%20%7C%20ESM-8A2BE2)]()
 [![Dependencies](https://img.shields.io/badge/Runtime%20deps-0-brightgreen)]()
 [![Build](https://img.shields.io/badge/Build%20step-none-lightgrey)]()
-[![Version](https://img.shields.io/badge/Version-1.10.0-orange)]()
+[![Version](https://img.shields.io/badge/Version-1.11.0-orange)]()
 [![PRs](https://img.shields.io/badge/PRs-welcome-brightgreen)]()
 
 </div>
@@ -40,6 +40,8 @@ Modern web apps ship their attack surface to the browser: API routes, feature fl
 - **Looks back in time.** Old bundles and source maps from the Wayback Machine often still contain endpoints that have since been removed from the live app.
 - **Maps the target's hosts.** Subdomains from the code, headers, the page's own traffic and certificate-transparency logs, which of them are **live**, and which are **high-value targets** (CI/CD, admin panels, staging, VPN, exposed dashboards, possible subdomain takeovers), each with the reason.
 - **Tells you what changed.** When a site is redeployed, the endpoints, parameters and chunks that came with the new version are marked *new*. New code is the least tested code.
+- **Remembers what you've looked at.** Mark rows *reviewed*, *reported* or *false positive*; the status survives rescans and redeploys, and **To review** shows only what's left.
+- **Knows the program's scope.** Paste the scope from HackerOne, Bugcrowd, Intigriti or YesWeHack (or HackerOne's CSV / Burp's JSON): active checks only go to what it lists, out-of-scope hosts are greyed, and one view merges every in-scope host.
 - **Hands it to your proxy.** OpenAPI and Postman exports for Burp, Caido, ZAP and Postman, a GraphQL schema sketch, wordlists, and an opt-in "send GET URLs to proxy" that fills the site map.
 - **Signal over noise.** Entropy-based confidence on secrets, *interesting* tags on admin / debug / redirect-style names, library noise tagged and hideable.
 - **Private.** Findings are stored in `chrome.storage` on your machine and never sent anywhere.
@@ -57,7 +59,7 @@ Modern web apps ship their attack surface to the browser: API routes, feature fl
 | **Domains** | Subdomains of the target found anywhere in the code, every host from the **Content-Security-Policy** and trusted **CORS** origins, the hosts the page **really loads from** (*observed*, live by definition) and, on request, every name in the **certificate-transparency logs** (crt.sh, *ct*). **Check live** (two clicks) sends one `GET /` to each subdomain and shows its status, page title, server and final URL after redirects; a made-up name is checked too, so **wildcard DNS** is spotted and its fake hits are discounted. Each host is rated as a **high-value target** (*high* / *medium*, sorted first) from what its name says — CI/CD, admin / internal, staging / dev, monitoring, data stores, VPN / mail, origin (CDN bypass), SSO — and what it answered: Jenkins, Grafana, Kibana, phpMyAdmin, an open Elasticsearch, a directory listing, a debug page, 401 / 403, a redirect to corporate SSO, or a **subdomain-takeover** signature (S3, GitHub Pages, Heroku, Shopify and 22 more). Every rating says why. A **Live** filter shows just the hosts that answered. |
 | **Cloud** | AWS (S3, API Gateway, Lambda URLs, AppSync, RDS, ELB, CloudFront, Cognito, ARNs), Azure, Google Cloud / Firebase, DigitalOcean, Oracle, Alibaba, Rackspace, DreamHost, Cloudflare R2, Wasabi, Backblaze, Linode, IBM COS, Supabase and PaaS hosts. |
 | **Params** | Every client-side input, grouped: **query parameters** (also through minified `URLSearchParams` variables, router `query.x`, `getParameterByName()`, `/[?&]token=/` regexes and names declared in config), **request body fields** (from the request code and the runtime hooks, each linked to its endpoints, object IDs tagged *idor*), **`data-*` attributes**, **form fields** (hidden ones tagged), **request headers** (incl. `Access-Control-Allow-Headers` and observed custom headers), **cookies** (incl. `Set-Cookie`, session cookies without `HttpOnly` flagged) and **localStorage / sessionStorage keys**. Names confirmed in real traffic or at runtime are tagged *observed* / *runtime*. |
-| **Deps** | **Dependency confusion**: package names from source maps, `node_modules/…` paths, imports and embedded `package.json` are checked against `registry.npmjs.org`. Missing packages and unclaimed scopes are **critical**. |
+| **Deps** | **Dependency confusion**: package names from source maps, `node_modules/…` paths, imports and embedded `package.json` are checked against `registry.npmjs.org`. Missing packages and unclaimed scopes are **critical**. **Known-vulnerable libraries**: versions of jQuery, AngularJS, DOMPurify, lodash, Bootstrap, Vue, Handlebars, Next.js and 60 more are read from banners, version strings, script URLs / file names, `node_modules` sources in source maps and the bundle's `.LICENSE.txt` (where webpack moves the banners), then matched **offline** against the bundled [retire.js](https://github.com/RetireJS/retire.js) advisory list: each row shows the advisories (CVE / GHSA, summary, affected range, link), the version that fixes them all, or *end of life*. |
 | **Intel** | Injected config objects (`window.APP_CONFIG = {…}` with their keys), switched-off **feature flags**, weak CSP (`'unsafe-inline'`, `'unsafe-eval'`, JSONP / user-content hosts), CORS `null` origin and write methods, server / framework **version banners**, platform fingerprints (Cloudflare, CloudFront, Vercel …), unusual custom response headers, lazy-chunk lists, exposed source maps, **bundle changes** (redeploys, with what's new), emails, internal IPs, developer comments. **postMessage handlers** with their origin check (none / weak substring / regex / strict), the message types they accept and the sinks the data reaches (HTML, code, navigation, storage, requests, replies to `"*"`). |
 | **Sinks** | **DOM-XSS taint flows**, on by default: a URL / attacker-influenced source (`location.hash` / `search` / `href`, `document.URL` / `referrer`, `window.name`, `URLSearchParams`, a query-param getter) reaching a dangerous sink in the same expression — `innerHTML` / `outerHTML`, `insertAdjacentHTML`, `document.write`, `dangerouslySetInnerHTML`, jQuery `.html()`, `eval` / `Function` / string timers (HTML & code sinks, *high*), and `location` / `window.open` navigation, `setAttribute("src"/"srcdoc"/…)` and `srcdoc` (*medium*). Precise enough to run without the noise of raw single-pattern sink rules. |
 | **Files** | Every scanned source (scripts, lazy chunks, inline scripts, iframes, DOM, source maps, response headers, observed traffic, runtime hooks, archived files from the Wayback Machine), with size, hits, errors and a **Sources .zip** button that rebuilds the original source tree from a map. |
@@ -69,6 +71,9 @@ Modern web apps ship their attack surface to the browser: API routes, feature fl
 - **Send GET URLs to proxy** (active, two clicks): requests each concrete, harmless-looking same-site GET URL once, so it lands in the site map of the proxy your browser uses.
 - **Subdomain liveness and high-value targets** (Domains tab): *Find more (crt.sh)* adds every name from the certificate-transparency logs (sends the domain name to crt.sh, nothing to the target); *Check live* (active, two clicks) requests `/` of each subdomain over HTTPS, then HTTP, without cookies — max 500 hosts, same registrable domain only, deny-listed hosts never — and rates each one. Exported as `live-hosts.txt` and `high-value-hosts.txt` and at the top of the text / Markdown reports.
 - **Endpoint liveness** (active, two clicks): sends the same safe same-site GET requests and records the HTTP status next to each endpoint, API and route — telling live (200), **protected (401 / 403, worth testing)**, wrong-method (405), redirecting (3xx) and dead (404) apart. GET only, same site only, capped, never cross-site.
+- **Triage**: every row has a ✓ (*reviewed*) button, and its detail offers *Reviewed* / *Reported* / *False positive*. The **Status** filter shows everything, only what's left **to review** (tab counts follow), or one status; **Mark reviewed** marks every row shown (two clicks). Triaged secrets stop counting on the toolbar badge and in notifications; false positives are left out of the text / Markdown reports and SARIF. Kept per host, apart from the findings, so rescans and redeploys keep it.
+- **Program scope** (Settings → *Program scope*): paste the scope table of a HackerOne / Bugcrowd / Intigriti / YesWeHack program (the *In scope* / *Out of scope* headings are understood), HackerOne's scope CSV or Burp's project-options JSON. `*.acme.com` (every subdomain), `acme.com` (that host), `api-*.acme.com`, `app.acme.com:8443`, `https://acme.com/api` (paths count for URL checks) and IPv4 ranges; out of scope wins, unlisted counts as out. Once set, the subdomain live check, endpoint liveness, *Send GET URLs to proxy* and source-map guessing **only contact in-scope hosts and URLs**. A host that isn't in scope shows a chip next to the host menu (in scope: a green status dot), the Domains tab greys out-of-scope hosts and gets an **In scope** filter, the ask-first prompt says whether the site is in scope, and *Scan in-scope sites without asking* can stand in for the per-site OK.
+- **All in-scope hosts** (host menu, with a scope set): every scanned in-scope host merged into one view and one set of exports. Relative endpoints and API paths are made absolute per host so they stay apart; a secret found on several hosts is one row listing them all. Triage from here is written back to every host.
 - **Offline secret enrichment** (no network): AWS access keys are decoded to the **account number** that owns them — computed from the key ID locally, nothing is sent to AWS — alongside the key type; GCP service-account JSON and Firebase web config are tied to their **project**; and JWTs are flagged *expired* / *expires-soon* from their `exp` claim. Demo / example-looking values are tagged so they can be hidden. JS Recon never validates a discovered credential against its issuer; confirm a key yourself with the issuer's own tooling (e.g. `aws sts get-access-key-info`).
 - **Wordlists** per input kind (params, body fields, headers, cookies, storage keys, paths, path segments, URLs, subdomains, live hosts, high-value hosts), ready for ffuf, Arjun, x8, Param Miner, httpx and nuclei.
 - **Historical JS from the Wayback Machine**: one archived file per distinct script first, sensitive names and source maps first, libraries last.
@@ -200,14 +205,14 @@ No build step and no runtime dependencies. Chrome / Edge 116+; the styled drop-d
 
 ## 🕹️ Usage
 
-- **Popup:** Secrets · API · Endpoints · URLs · Domains · Cloud · Params · Deps · Intel · Files. Filter with text or `/regex/`, narrow by severity, hide tentative secrets or noise, show only *interesting* items. Click a row for every source location with highlighted context, decoded JWT claims, entropy and npm status.
-- **Dashboard** (⤢ in the popup): the same in a full tab, plus a host switcher, the **Manual scan** panel (JS / `.map` URLs or pasted code), the **Dump** panel, the **Search file contents** panel (grep the chunks for a string or `/regex/`) and **Wayback** (historical JS of the current host).
+- **Popup:** Secrets · API · Endpoints · URLs · Domains · Cloud · Params · Deps · Intel · Files. Filter with text or `/regex/`, narrow by severity or triage status, hide tentative secrets or noise, show only *interesting* items. Click a row for every source location with highlighted context, decoded JWT claims, entropy, npm status and library advisories, and to mark it reviewed / reported / false positive.
+- **Dashboard** (⤢ in the popup): the same in a full tab, plus a host switcher (with *All in-scope hosts* once a program scope is set), the **Manual scan** panel (JS / `.map` URLs or pasted code), the **Dump** panel, the **Search file contents** panel (grep the chunks for a string or `/regex/`) and **Wayback** (historical JS of the current host).
 - **Rescan** re-fetches and re-scans every file of the current host and re-collects the page and its iframes.
 - **Export:**
 
   | Export | Format |
   |---|---|
-  | JSON report | one host or all hosts, every finding with its sources, plus the discovered chunk list |
+  | JSON report | one host, all in-scope hosts merged, or all hosts: every finding with its sources, the discovered chunk list, host checks and triage status |
   | Text report | grouped by tab |
   | **Markdown report** | `.md` grouped by tab, ready to paste into a ticket, PR or wiki |
   | **SARIF 2.1.0** | `.sarif` of the secret, sink, intel, cloud and dependency findings with their source file + line, for CI code-scanning (GitHub / GitLab security tabs, DefectDojo, ZAP) |
@@ -236,6 +241,7 @@ Everything below runs locally. This is all the traffic the extension itself crea
 | Follow source maps | on | requests `.map` files the scripts point to |
 | **Fetch lazy-loaded chunks** | on, max 400 / host | requests chunk files listed by the bundler runtime |
 | Dependency-confusion check | on | sends package **names** to `registry.npmjs.org` (cached 3 days) |
+| Known-vulnerable libraries | on | none: advisories are bundled. Reads the `.LICENSE.txt` a webpack bundle points to (a static file, like a source map) |
 | Runtime hooks | **off** | none; injects `src/runtime.js` into in-scope pages |
 | Wayback Machine for new hosts | **off** (button: on demand) | sends the **host name** to `web.archive.org` and fetches archived files from there, never from the target |
 | Certificate transparency (Domains → *Find more*) | manual, one click | sends the **registrable domain** to `crt.sh`; nothing goes to the target or the hosts it names |
@@ -243,6 +249,8 @@ Everything below runs locally. This is all the traffic the extension itself crea
 | Guess source-map locations | **off** | requests `file.js.map`, then `file.map` |
 | Crawl referenced JS | **off** | requests same-site `.js` URLs found in code |
 | Send GET URLs to proxy | manual, two clicks (Export menu) | one GET per concrete same-site URL, max 500, with your cookies; skips URLs with placeholders and anything that sounds state-changing (logout, delete, reset, revoke …); redirects are not followed |
+
+**Program scope:** once set (Settings → *Program scope*), every active request above — the subdomain live check, endpoint liveness, *Send GET URLs to proxy*, source-map guessing — only goes to hosts and URLs it lists; anything excluded or unlisted is skipped and counted. Without one, they stay on the target's own registrable domain as before.
 
 **Scope:** by default JS Recon **asks before scanning a site**. Nothing is fetched, observed or hooked until you OK it: a **?** on the toolbar icon means the tab is waiting, and the popup offers *Scan this tab* (one-off, while the tab stays on that host), *Always scan this site* (adds it to the allow-list) or *Never* (adds it to the deny-list). Other modes: only the active tab, every open tab, or only the allow-list; a deny-list is never scanned in any mode. Analytics / ad / consent scripts are ignored (editable), and scripts can optionally be restricted to first-party only. Iframes follow the same filters as scripts. Every rule can be switched off individually.
 
@@ -254,10 +262,12 @@ Everything below runs locally. This is all the traffic the extension itself crea
 node test/run-tests.mjs        # rules, inputs, headers, lazy chunks, postMessage, routes, DOM-XSS taint, offline enrichment
                                # (AWS/GCP/Firebase + JWT expiry), provider-token rules, observed requests, GraphQL + schema,
                                # OpenAPI / Postman / SARIF, Wayback order, crt.sh parsing, takeover / product fingerprints,
-                               # high-value rating, ZIP, 6 MB perf check
+                               # high-value rating, program-scope import + matching, library versions + advisories,
+                               # program-view merge, ZIP, 6 MB perf checks
 node test/sw-harness.mjs       # service worker end to end with mocked chrome.*, fetch, npm and archive.org: iframes, chunks,
                                # headers, observed traffic, runtime hooks, Wayback, crt.sh, subdomain live check + wildcard DNS,
-                               # change alerts, send to proxy, endpoint liveness, dumper
+                               # change alerts, send to proxy, endpoint liveness, dumper, vulnerable libraries + .LICENSE.txt,
+                               # triage (badge, rescans), program scope on every active check, ask-first + scope
 node test/fp-sweep.mjs <dir>   # scan a directory of real JS and list secret hits (false-positive check)
 ```
 
@@ -280,11 +290,15 @@ src/requests.js     observed requests (path normalisation, parameter / header na
 src/graphql.js      GraphQL document extraction, parser and schema sketch
 src/exporters.js    OpenAPI 3 and Postman v2.1 builders, "send to proxy" URL filter
 src/hosts.js        subdomains: crt.sh parsing, live-check fingerprints (title, product, takeover, wildcard), high-value rating
+src/scope.js        program scope: import (scope text, HackerOne CSV, Burp JSON) and host / URL matching
+src/libs.js         library versions (banners, version strings, URLs, .LICENSE.txt) → advisories
+src/vulndb.js       advisory data generated from retire.js (tools/update-vulndb.mjs), Apache-2.0, see vulndb-LICENSE.md
 src/runtime.js      opt-in hooks that run in the page's own world
 src/sourcemap.js    source-map parsing shared by worker and UI
 src/zip.js          small ZIP writer (deflate via CompressionStream)
 src/content.js      collects script URLs, inline scripts and DOM from pages and iframes
-ui/                 popup / dashboard / settings, dump.js (source reconstruction + dumper), search.js (content grep)
+ui/                 popup / dashboard / settings, dump.js (source reconstruction + dumper), search.js (content grep),
+                    program.js (all in-scope hosts merged into one view)
 icons/  fonts/      toolbar icons and logo; Inter and JetBrains Mono (SIL OFL)
 assets/             README banner and screenshots
 test/               Node tests
@@ -303,11 +317,13 @@ JS Recon is for **authorized** security testing only: pentest engagements, bug-b
 - ✅ The subdomain live check needs two clicks, only requests `/` of the target's own subdomains, sends no cookies and never touches deny-listed hosts
 - ✅ Only names are recorded from real traffic and at runtime, never values (Authorization: scheme only)
 - ✅ Scope allow-list / deny-list and per-rule switches
+- ✅ With a program scope set, active checks never contact a host or URL it doesn't list
 - ✅ Findings stay in your browser; nothing is uploaded
 - ✅ The dependency-confusion check only *reads* the npm registry; nothing is ever published
 - ❌ Don't point it at systems you aren't authorized to test
 - ❌ Results are leads, not verdicts: confirm secrets, dependency-confusion candidates, CSP / CORS findings and takeover signatures (`dig CNAME host`) before reporting
-- ❌ Check the program's scope before running the live check: a wildcard scope (`*.acme.com`) covers subdomains, a single-host scope does not
+- ❌ Set the program scope (Settings → *Program scope*) before running active checks; without it they cover the target's whole registrable domain, and a single-host program doesn't allow that
+- ❌ An outdated library is a lead, not a finding: show that the app reaches the vulnerable code before reporting
 
 **Dependency-confusion results need confirming.** A name missing from npm only matters if some build resolves it from the public registry. The scope check uses `/-/org/<scope>/package` and `/-/user/<scope>/package`; if neither answers clearly the result is *scope status unknown*, so check `npmjs.com/org/<scope>` by hand.
 
@@ -315,5 +331,5 @@ JS Recon is for **authorized** security testing only: pentest engagements, bug-b
 
 ## 📜 License
 
-MIT, see [`LICENSE`](LICENSE). Bundled fonts: Inter and JetBrains Mono under the SIL Open Font License (`fonts/`).
+MIT, see [`LICENSE`](LICENSE). Bundled fonts: Inter and JetBrains Mono under the SIL Open Font License (`fonts/`). Bundled advisory data (`src/vulndb.js`) is generated from the [retire.js](https://github.com/RetireJS/retire.js) repository under the Apache License 2.0 (`src/vulndb-LICENSE.md`); refresh it with `node tools/update-vulndb.mjs`.
 Use JS Recon only against systems you are explicitly authorized to test.

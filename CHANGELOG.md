@@ -5,6 +5,45 @@ All notable changes to **JS Recon** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.0] — 2026-11-15
+
+### Added
+- **Triage.** Mark any row *reviewed*, *reported* or *false positive*: a ✓ button on every row, and
+  the three statuses at the top of its detail. The new **Status** filter shows everything, only
+  what's left **to review** (the tab counts follow), or one status; **Mark reviewed** marks every row
+  shown (two clicks), or clears them when a status is filtered. The status is stored per host,
+  apart from the findings, so rescans and redeploys keep it. Triaged findings stop counting on the
+  toolbar badge and in desktop notifications; false positives are left out of the text / Markdown
+  reports and SARIF, reported / reviewed ones are marked there; the JSON report carries the statuses.
+- **Program scope** (Settings → *Program scope*). Paste the scope table of a HackerOne, Bugcrowd,
+  Intigriti or YesWeHack program (the *In scope* / *Out of scope* headings are understood, lines
+  starting with `-` / `!` count as out), HackerOne's scope CSV (ineligible assets → out, app-store
+  ids skipped) or Burp's project-options JSON (host regexes converted). Patterns: `*.acme.com` (every
+  subdomain, not the apex), `acme.com` (that host only), `api-*.acme.com`, `app.acme.com:8443`,
+  `https://acme.com/api` (paths count for URL checks) and IPv4 ranges. Out of scope wins; a host on
+  neither list counts as out. A test box shows how any host or URL is classified.
+  - With a scope set, the subdomain live check, endpoint liveness, *Send GET URLs to proxy* and
+    source-map guessing only contact in-scope hosts and URLs, and say how many they skipped.
+  - A host that isn't in scope gets a chip next to the host menu (in scope: a green status dot);
+    the Domains tab greys excluded and unlisted hosts, counts the in-scope ones and gets an
+    **In scope** filter; the ask-first prompt says whether the site is in scope.
+  - *Scan in-scope sites without asking*: in ask-first mode, the scope can stand in for the
+    per-site OK (off by default).
+- **All in-scope hosts.** With a scope set, the host menu gets one entry that merges every scanned
+  in-scope host into a single view, with the same exports. Relative endpoints and API paths are made
+  absolute per host so they stay apart; a finding seen on several hosts is one row that lists them.
+  Triage from this view is written back to every host; per-host actions (rescan, live checks,
+  crt.sh, Wayback) ask you to pick a host.
+- **Known-vulnerable libraries** (Deps tab, on by default, offline). Library versions are read from
+  banner comments, version strings, script URLs and file names (CDN paths), `node_modules` sources in
+  source maps (even when those aren't scanned) and the `.LICENSE.txt` file webpack writes next to a
+  bundle, and matched against advisories from the [retire.js](https://github.com/RetireJS/retire.js)
+  repository, bundled in `src/vulndb.js` (68 libraries, 809 advisories; Apache-2.0). Each row shows
+  the number of advisories and the version that fixes them all (or *end of life* when no release of
+  that line does); the detail lists every advisory with its CVE / GHSA ids, summary, affected range
+  and link, and points to tainted flows in the Sinks tab that may reach the library. Versions
+  without advisories are listed as *info*. `tools/update-vulndb.mjs` refreshes the data.
+
 ## [1.10.0] — 2026-11-15
 
 ### Added

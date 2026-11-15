@@ -15,6 +15,7 @@
       </div>
       <span class="divider"></span>
       <select id="hostSelect" class="host-select" title="Host"><button type="button"><selectedcontent></selectedcontent></button></select>
+      <span id="scopeChip" class="chip" hidden></span>
       <span id="status" class="status"></span>
       <div class="actions">
         <button id="btnManual" class="btn ghost full-only" title="Scan URLs or pasted code">
@@ -158,14 +159,26 @@
         <option value="medium">≥ Medium</option>
         <option value="low">≥ Low</option>
       </select>
+      <select id="triageFilter" title="Status you gave rows: reviewed, reported, false positive. “To review” hides everything you've already looked at.">
+        <option value="all">Any status</option>
+        <option value="todo">To review</option>
+        <option value="reviewed">Reviewed</option>
+        <option value="reported">Reported</option>
+        <option value="fp">False positive</option>
+      </select>
       <label class="chk" id="tentativeWrap" title="Hide low-value secrets: demo / example-looking values and those with low Shannon entropy (tentative)"><input type="checkbox" id="hideTentative" /> Hide low-value</label>
       <label class="chk" id="noiseWrap" title="Hide static assets (images, css, fonts) and library/documentation noise"><input type="checkbox" id="hideNoise" /> Hide noise</label>
       <label class="chk" id="interestingWrap" title="Only paths that look sensitive (admin, debug, upload, token, graphql …)"><input type="checkbox" id="onlyInteresting" /> Interesting</label>
       <label class="chk" id="newWrap" title="Only findings that first appeared in the latest version of the app's bundle" hidden><input type="checkbox" id="onlyNew" /> New</label>
       <label class="chk" id="absWrap" title="Resolve relative paths against the site origin"><input type="checkbox" id="absolute" /> Absolute</label>
       <label class="chk" id="liveWrap" title="Only subdomains that answered: our live check, or the page loaded something from them" hidden><input type="checkbox" id="onlyLive" /> Live</label>
+      <label class="chk" id="inScopeWrap" title="Only hosts the program scope lists (Settings → Program scope)" hidden><input type="checkbox" id="onlyInScope" /> In scope</label>
       <span class="spacer"></span>
       <span id="count" class="muted"></span>
+      <button id="btnTriage" class="btn" title="Mark the rows shown as reviewed" hidden>
+        <svg class="i" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5" /></svg>
+        Mark reviewed
+      </button>
       <button id="btnCopy" class="btn" title="Copy the filtered list">
         <svg class="i" viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="11.5" height="11.5" rx="2" /><path d="M15.5 8.5V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7.5a2 2 0 0 0 2 2h2.5" /></svg>
         Copy

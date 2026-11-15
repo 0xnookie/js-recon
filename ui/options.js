@@ -1,6 +1,7 @@
 import { RULES, CATEGORY_LABELS, parseCustomRules } from '../src/rules.js';
 import { DEFAULT_SETTINGS, DEFAULT_IGNORED_SCRIPT_HOSTS, getSettings, saveSettings } from '../src/settings.js';
 import { formatBytes } from '../src/util.js';
+import { parseScope, compileScope, hasScope, hostScope, urlScope } from '../src/scope.js';
 
 const $ = (s) => document.querySelector(s);
 let settings = null;
@@ -51,6 +52,62 @@ function bindFields() {
     $('[data-key="ignoreScriptHosts"]').value = DEFAULT_IGNORED_SCRIPT_HOSTS.join('\n');
     save({ ignoreScriptHosts: [...DEFAULT_IGNORED_SCRIPT_HOSTS] });
   });
+}
+
+// ── program scope ──
+
+const SCOPE_WORDS = { in: 'in scope', out: 'out of scope', unlisted: 'not listed: treated as out of scope' };
+
+function testScope() {
+  const raw = $('#scopeTestInput').value.trim();
+  const el = $('#scopeTestResult');
+  const scope = compileScope(settings.scopeIn, settings.scopeOut);
+  if (!raw) return void (el.textContent = '');
+  if (!hasScope(scope)) return void (el.textContent = 'No scope set: active checks use the target\'s own registrable domain.');
+  const st = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? urlScope(scope, raw) : hostScope(scope, raw.replace(/\/.*$/, ''));
+  el.replaceChildren();
+  const chip = document.createElement('span');
+  chip.className = `chip scope-${st}`;
+  chip.textContent = SCOPE_WORDS[st];
+  el.append(chip);
+}
+
+function setScopeLists(inList, outList) {
+  $('[data-key="scopeIn"]').value = inList.join('\n');
+  $('[data-key="scopeOut"]').value = outList.join('\n');
+  return save({ scopeIn: inList, scopeOut: outList }).then(testScope);
+}
+
+function bindScope() {
+  const importScope = async (replace) => {
+    const text = $('#scopePaste').value;
+    const r = parseScope(text);
+    const msg = $('#scopeMsg');
+    if (!r.in.length && !r.out.length) return void (msg.textContent = 'No hosts found in the pasted text.');
+    const outList = [...new Set([...(replace ? [] : settings.scopeOut || []), ...r.out])];
+    const inList = [...new Set([...(replace ? [] : settings.scopeIn || []), ...r.in])].filter((p) => !outList.includes(p));
+    await setScopeLists(inList, outList);
+    const fmt = { 'hackerone-csv': 'HackerOne CSV', burp: 'Burp JSON', text: 'text' }[r.format];
+    msg.textContent = `${replace ? 'Scope set' : 'Added'}: ${r.in.length} in scope, ${r.out.length} out of scope (${fmt})${r.skipped.length ? ` · skipped ${r.skipped.length} non-web assets: ${r.skipped.slice(0, 4).join(', ')}${r.skipped.length > 4 ? '…' : ''}` : ''}`;
+    $('#scopePaste').value = '';
+  };
+  $('#scopeImport').addEventListener('click', () => importScope(false));
+  $('#scopeReplace').addEventListener('click', () => importScope(true));
+  const clear = $('#scopeClear');
+  clear.addEventListener('click', async () => {
+    if (!clear.classList.contains('confirm')) {
+      clear.classList.add('confirm');
+      clear.textContent = 'Click again to clear';
+      setTimeout(() => (clear.classList.remove('confirm'), (clear.textContent = 'Clear scope')), 4000);
+      return;
+    }
+    clear.classList.remove('confirm');
+    clear.textContent = 'Clear scope';
+    await setScopeLists([], []);
+    $('#scopeMsg').textContent = 'Scope cleared.';
+  });
+  $('#scopeTestInput').addEventListener('input', testScope);
+  for (const k of ['scopeIn', 'scopeOut']) $(`[data-key="${k}"]`).addEventListener('input', () => setTimeout(testScope, 600));
 }
 
 function ruleEnabled(r) {
@@ -176,6 +233,7 @@ function bindData() {
 async function init() {
   settings = await getSettings();
   bindFields();
+  bindScope();
   renderRules();
   bindRules();
   bindCustom();

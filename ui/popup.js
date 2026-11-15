@@ -7,6 +7,9 @@ import { ZipWriter } from '../src/zip.js';
 import { buildOpenApi, buildPostman, buildSarif, replayCandidates } from '../src/exporters.js';
 import { parseDefinition, schemaSketch } from '../src/graphql.js';
 import { rateHost, hostAlive } from '../src/hosts.js';
+import { compileScope, hasScope, hostScope, urlScope } from '../src/scope.js';
+import { VULNDB_DATE } from '../src/libs.js';
+import { PROGRAM, mergeHosts, triageTargets } from './program.js';
 
 const params = new URLSearchParams(location.search);
 const FULL = params.get('view') === 'full';
@@ -61,6 +64,9 @@ const ui = {
   hideTentative: store.get('hideTentative', false),
   onlyInteresting: false,
   onlyNew: false,
+  onlyInScope: false,
+  triage: store.get('triage', 'all'), // all | todo | reviewed | reported | fp
+  scope: compileScope(),
   absolute: store.get('absolute', false),
   limit: 400,
   expanded: new Set(),
@@ -173,10 +179,17 @@ const PARAM_DESC = {
   storage: 'localStorage / sessionStorage key. Debug and feature switches often live here.',
 };
 
+const isProgram = () => ui.host === PROGRAM;
+/** Name used in reports and file names: the host, or "program" for the merged in-scope view. */
+const hostLabel = () => (isProgram() ? 'program' : ui.host);
+const scoped = () => hasScope(ui.scope);
+
 function buildModel(data) {
   const m = { secrets: [], api: [], endpoints: [], urls: [], domains: [], cloud: [], params: [], deps: [], intel: [], sinks: [], routes: [], files: [], graphql: [] };
   if (!data) return m;
   const pageSite = siteOf((ui.host || '').replace(/:\d+$/, ''));
+  // the target's own sites: this host's, or in the program view every merged host's
+  const ownSites = new Set(data.program ? data.hosts.map((x) => siteOf(x.replace(/:\d+$/, ''))) : [pageSite]);
   const params = new Map();
   const domains = new Map();
   const addParam = (name, example, f, kind = 'query') => {
@@ -201,7 +214,7 @@ function buildModel(data) {
     if (!d) {
       const hostname = host.replace(/:\d+$/, '');
       const site = siteOf(hostname);
-      const tags = [site === pageSite ? 'same-site' : 'third-party'];
+      const tags = [ownSites.has(site) ? 'same-site' : 'third-party'];
       // only look at the subdomain labels: "staging.acme.io" yes, "acme.test" no
       if (hostname !== site && DEV_HOST_RE.test(hostname.slice(0, -site.length - 1))) tags.push('interesting');
       if (CLOUD_HOST_RE.test(host.replace(/:\d+$/, ''))) tags.push('cloud');
@@ -256,10 +269,18 @@ function buildModel(data) {
       const { pending, ...rest } = d.check;
       d.check = rest.seen ? rest : null;
     }
-    d.rating = rateHost(d.value, pageSite, d.check, wild);
+    d.rating = rateHost(d.value, siteOf(d.value.replace(/:\d+$/, '')), d.check, wild);
     if (d.rating.wildcard) d.tags.push('wildcard');
     else if (hostAlive(d.check)) d.tags.push('live');
     if (d.check?.takeover && !d.rating.wildcard) d.tags.push('takeover');
+  }
+  // program scope (Settings → Program scope): out-of-scope and unlisted hosts are marked and greyed
+  if (scoped()) {
+    for (const d of domains.values()) {
+      d.scope = d.value.includes('*') ? null : hostScope(ui.scope, d.value);
+      if (d.scope === 'out') d.tags.push('out-of-scope');
+      else if (d.scope === 'unlisted' && d.tags.includes('same-site')) d.tags.push('not-in-scope');
+    }
   }
   const has = (x, t) => (x.tags.includes(t) ? 1 : 0);
   m.domains = [...domains.values()].sort(
@@ -291,6 +312,12 @@ function buildModel(data) {
       a.value.localeCompare(b.value),
   );
   m.files = Object.values(data.files).sort((a, b) => (b.ts || 0) - (a.ts || 0));
+  // what the user has already looked at (reviewed / reported / false positive), by row key
+  const triage = data.triage || {};
+  for (const [tab, list] of Object.entries(m)) {
+    if (tab === 'files') continue;
+    for (const f of list) f.triage = triage[f.key]?.s || null;
+  }
   return m;
 }
 
@@ -330,16 +357,25 @@ const SEV_TABS = new Set(['secrets', 'intel', 'cloud', 'deps']);
 const NOISE_TABS = new Set(['endpoints', 'urls', 'intel', 'params']);
 const INTERESTING_TABS = new Set(['endpoints', 'urls', 'domains', 'api', 'params', 'routes']);
 
+/** The Status filter: everything, only what is left to review, or one triage status. */
+function triagePass(f, tab = ui.tab) {
+  if (tab === 'files' || ui.triage === 'all') return true;
+  if (ui.triage === 'todo') return !f.triage;
+  return f.triage === ui.triage;
+}
+
 function filtered(tab) {
   const items = ui.model[tab] || [];
   const match = makeMatcher(ui.q.trim());
   const minSev = ui.sev === 'all' ? -1 : SEV_RANK[ui.sev];
   return items.filter((f) => {
+    if (!triagePass(f, tab)) return false;
     if (SEV_TABS.has(tab) && (SEV_RANK[f.severity] || 0) < minSev) return false;
     if (tab === 'secrets' && ui.hideTentative && (f.confidence === 'tentative' || f.tags?.includes('example'))) return false;
     if (ui.hideNoise && NOISE_TABS.has(tab) && f.tags?.some((t) => t === 'noise' || t === 'static')) return false;
     if (ui.onlyInteresting && INTERESTING_TABS.has(tab) && !f.tags?.some((t) => t === 'interesting' || t === 'idor') && !f.rating?.level) return false;
     if (ui.onlyLive && tab === 'domains' && !f.tags?.includes('live')) return false;
+    if (ui.onlyInScope && tab === 'domains' && scoped() && f.scope !== 'in') return false;
     if (ui.onlyNew && tab !== 'files' && !f.tags?.includes('new')) return false;
     if (tab === 'files') return match(f.url + ' ' + (f.label || '') + ' ' + (f.error || ''));
     return match(f.value + ' ' + (f.label || '') + ' ' + (f.examples || []).join(' ') + ' ' + (f.tags || []).join(' '));
@@ -390,7 +426,79 @@ const CHIP_TITLES = {
   takeover: 'Answers with a hosting provider\'s "no such site / bucket" page: possible subdomain takeover',
   wildcard: 'Answers exactly like a made-up subdomain (wildcard DNS): probably not a real host',
   'in-code': 'Found in the JavaScript / HTML',
+  'out-of-scope': 'Excluded by the program scope (Settings → Program scope): no active checks are sent to it',
+  'not-in-scope': 'Not listed in the program scope (Settings → Program scope): no active checks are sent to it',
+  vulnerable: 'A library version with published advisories (retire.js data)',
+  library: 'Library version found; no known advisory for it',
 };
+
+// ── triage: reviewed / reported / false positive, stored per host (survives rescans and redeploys) ──
+
+const TRIAGE = {
+  reviewed: { label: 'reviewed', title: 'Looked at, nothing to report' },
+  reported: { label: 'reported', title: 'Reported (or being written up)' },
+  fp: { label: 'false positive', title: 'Not a real issue' },
+};
+
+/** Writes a status (or null to clear it) for these rows, updating the view at once. */
+async function setTriage(items, status) {
+  items = items.filter((f) => f?.key);
+  if (!items.length || !ui.data) return;
+  const t = (ui.data.triage ||= {});
+  for (const f of items) {
+    if (status) t[f.key] = { s: status, at: Date.now() };
+    else delete t[f.key];
+    f.triage = status || null;
+  }
+  render();
+  const targets = isProgram() ? triageTargets(items, ui.data.hosts) : [{ host: ui.host, keys: items.map((f) => f.key) }];
+  let failed = 0;
+  for (const { host, keys } of targets) {
+    try {
+      const r = await chrome.runtime.sendMessage({ type: 'triage', host, keys, status: status || null });
+      if (!r?.ok) failed++;
+    } catch {
+      failed++;
+    }
+  }
+  if (failed) toast('Could not save the status, try again');
+}
+
+function triageChip(f) {
+  const t = TRIAGE[f.triage];
+  return t ? h('span', { class: `chip triage t-${f.triage}`, title: t.title }, t.label) : null;
+}
+
+/** The status buttons at the top of an expanded row. */
+function triageBar(f) {
+  const b = (status, label, title) =>
+    h('button', { class: `mini${f.triage === status ? ' primary' : ''}`, title, onclick: (e) => (e.stopPropagation(), setTriage([f], f.triage === status ? null : status)) }, label);
+  return h(
+    'div',
+    { class: 'triage-bar' },
+    h('span', { class: 'muted small' }, 'Status'),
+    b('reviewed', 'Reviewed', 'Looked at it: hide it with Status → To review'),
+    b('reported', 'Reported', 'Reported, or being written up'),
+    b('fp', 'False positive', 'Not a real issue: left out of the reports and SARIF'),
+    f.triage ? h('button', { class: 'mini', onclick: (e) => (e.stopPropagation(), setTriage([f], null)) }, 'Clear') : null,
+  );
+}
+
+/** Adds the status chip and the quick "mark reviewed" button to a rendered row. */
+function decorateTriage(row, f) {
+  const head = row.querySelector(':scope > .row-head');
+  if (!head) return row;
+  if (f.triage) row.classList.add('triaged', 't-' + f.triage);
+  const chip = triageChip(f);
+  const spacer = head.querySelector(':scope > .spacer');
+  if (chip) head.insertBefore(chip, spacer || null);
+  const quick = f.triage
+    ? btn('↺', 'Clear the status', () => setTriage([f], null), 'triage-quick')
+    : btn('✓', 'Mark reviewed (looked at it, nothing to report)', () => setTriage([f], 'reviewed'), 'triage-quick');
+  const last = head.lastElementChild;
+  head.insertBefore(quick, last?.tagName === 'BUTTON' ? last : null);
+  return row;
+}
 function chips(tags) {
   return (tags || []).filter((t) => !HIDDEN_CHIPS.has(t)).map((t) => h('span', { class: `chip ${t}`, title: CHIP_TITLES[t] || '' }, t.replace(/-/g, ' ')));
 }
@@ -417,6 +525,12 @@ function detailFor(f) {
   delete meta.method;
   delete meta.path;
   delete meta.graphql;
+  delete meta.vulns;
+  if (meta.kind === 'library') {
+    // name and version are the row's value already
+    for (const k of ['kind', 'library', 'version', 'eol']) delete meta[k];
+  }
+  if (f.hosts?.length) meta.hosts = f.hosts;
   const doc = meta.document;
   delete meta.document;
   if (f.meta?.graphql) meta.endpoint = graphqlEndpoint();
@@ -433,7 +547,14 @@ function detailFor(f) {
   return d;
 }
 
-function expandable(row, key, build) {
+function expandable(row, key, buildDetail) {
+  // rows that can be triaged get the status buttons on top of their detail
+  const build = () => {
+    const d = buildDetail();
+    const f = ui.itemsByKey?.get(key);
+    if (f && d) d.prepend(triageBar(f));
+    return d;
+  };
   const open = ui.expanded.has(key);
   row.classList.toggle('open', open);
   if (open) row.append(build());
@@ -595,7 +716,60 @@ function routeRow(f) {
 
 const DEP_STATUS = { 'on-npm': 'on npm', 'not-on-npm': 'NOT on npm', 'scope-unclaimed': 'scope unclaimed', 'private-scope': 'private scope', unpublished: 'unpublished', unverified: 'unverified' };
 
+/** A library version (retire.js data): advisories, fix version, and where the version was found. */
+function libRow(f) {
+  const n = f.meta?.advisories || 0;
+  const row = h(
+    'div',
+    { class: `row link sev-${f.severity}` },
+    head(
+      h('span', { class: `pill ${f.severity}` }, f.severity),
+      h('span', { class: 'value mono', title: f.value }, f.value),
+      n
+        ? h('span', { class: 'chip vulnerable', title: f.meta.ids || '' }, `${n} advisor${n === 1 ? 'y' : 'ies'}`)
+        : h('span', { class: 'chip library', title: CHIP_TITLES.library }, 'no known vulns'),
+      n && f.meta['fixed in']
+        ? h('span', { class: 'src', title: f.meta.eol ? 'Some advisories cover every release of this line: no version of it fixes them' : 'Upgrading to this version fixes every listed advisory' }, f.meta.eol ? 'end of life, no fix' : `fixed in ${f.meta['fixed in']}`)
+        : null,
+      h('span', { class: 'spacer' }),
+      srcSummary(f),
+      btn('Copy', 'Copy "library version"', () => copy(f.value)),
+    ),
+  );
+  return expandable(row, f.key, () => libDetail(f));
+}
+
+const SINK_LIBS = { jquery: /jquery/, DOMPurify: /./, angularjs: /angular|template/i, handlebars: /template|handlebars/i };
+
+function libDetail(f) {
+  const d = detailFor(f);
+  const vulns = f.meta?.vulns || [];
+  if (vulns.length) {
+    const list = h('div', { class: 'advisories' });
+    for (const [ids, sev, summary, range, link] of vulns) {
+      list.append(
+        h(
+          'div',
+          { class: 'advisory' },
+          h('span', { class: `pill ${sev}` }, sev),
+          h('div', { class: 'advisory-body' }, h('div', {}, summary || ids || 'Advisory'), h('div', { class: 'muted small mono' }, [ids, range].filter(Boolean).join(' · '))),
+          isHttp(link) ? h('a', { class: 'mini-link', href: link, target: '_blank', rel: 'noreferrer', title: link }, 'details') : null,
+        ),
+      );
+    }
+    d.insertBefore(list, d.querySelector(':scope > .source') || null);
+  }
+  // tainted sinks on the same host make an outdated sanitiser / templating / DOM library more interesting
+  const lib = f.meta?.library;
+  const re = SINK_LIBS[lib];
+  const sinks = re ? (ui.model?.sinks || []).filter((s) => s.tags?.includes('tainted') || /taint/.test(s.rule || '')).filter((s) => re.test(s.rule + ' ' + s.label)) : [];
+  if (vulns.length && sinks.length) d.prepend(h('div', { class: 'desc' }, `The Sinks tab has ${sinks.length} tainted flow${sinks.length === 1 ? '' : 's'} on this host that may reach ${lib}: start there.`));
+  d.append(h('div', { class: 'muted small' }, `Advisory data: retire.js repository, ${VULNDB_DATE}.`));
+  return d;
+}
+
 function depRow(f) {
+  if (f.meta?.kind === 'library') return libRow(f);
   const tag = f.tags?.[0] || 'unverified';
   const row = h(
     'div',
@@ -622,7 +796,7 @@ function domainRow(d) {
   const openUrl = `${c?.scheme || c?.seen?.scheme || 'https'}://${d.value}`;
   const row = h(
     'div',
-    { class: `row link${r?.level === 'high' ? ' sev-high' : ''}` },
+    { class: `row link${r?.level === 'high' ? ' sev-high' : ''}${d.scope === 'out' || (d.scope === 'unlisted' && d.tags.includes('same-site')) ? ' oos' : ''}` },
     head(
       r?.level ? h('span', { class: `pill ${r.level}`, title: `${VALUE_TITLE[r.level]}:\n${r.reasons.join('\n')}` }, r.level) : null,
       h('span', { class: 'value mono', title: d.value }, d.value),
@@ -661,6 +835,7 @@ function domainDetail(d) {
   if (c.seen) meta['loaded by the page'] = `${c.seen.status} (${c.seen.type})`;
   Object.assign(meta, { 'final URL': c.url, title: c.title, product: c.product, server: c.server, 'x-powered-by': c.poweredBy, 'content-type': c.type });
   if (c.at && c.status != null && !c.pending) meta.checked = new Date(c.at).toLocaleString();
+  if (d.scope) meta['program scope'] = { in: 'in scope', out: 'out of scope', unlisted: 'not listed (treated as out of scope)' }[d.scope];
   let desc = null;
   if (d.rating?.wildcard) desc = `A made-up subdomain (${ui.data?.hostWildcard?.name}) answers the same way, so DNS has a wildcard record: this name is probably not a real host.`;
   else if (c.takeover) desc = TAKEOVER_DESC(d.value, c.takeover);
@@ -676,7 +851,7 @@ function paramRow(p) {
   return expandable(row, p.key, () => detailFor(p));
 }
 
-const KIND_LABEL = { script: 'script', crawled: 'crawled', chunk: 'chunk', manual: 'manual', inline: 'inline', html: 'DOM', sourcemap: 'map', headers: 'headers', observed: 'traffic', runtime: 'runtime', wayback: 'wayback', ct: 'crt.sh' };
+const KIND_LABEL = { script: 'script', crawled: 'crawled', chunk: 'chunk', manual: 'manual', inline: 'inline', html: 'DOM', sourcemap: 'map', headers: 'headers', observed: 'traffic', runtime: 'runtime', wayback: 'wayback', ct: 'crt.sh', license: 'licenses' };
 
 async function downloadSources(f) {
   toast('Rebuilding sources…');
@@ -750,7 +925,7 @@ const EMPTY = {
   domains: 'No domains or subdomains found.',
   cloud: 'No cloud assets found.',
   params: 'No parameters found.',
-  deps: 'No npm dependencies found. They are extracted from source maps, node_modules paths, imports and package.json blobs.',
+  deps: 'No dependencies found. npm package names come from source maps, node_modules paths, imports and package.json blobs; library versions (checked against known advisories) from banners, version strings, script URLs and .LICENSE.txt files.',
   intel: 'Nothing here yet.',
   sinks: 'No tainted DOM sinks found. Taint flows (a URL source reaching innerHTML / eval / navigation) run by default; the broader single-pattern sink rules can be enabled in Settings.',
   routes: 'No client-side routes found (React Router, Vue Router, Angular …).',
@@ -805,7 +980,7 @@ function renderTabs() {
   const scrollLeft = nav.scrollLeft;
   nav.replaceChildren();
   for (const t of TABS) {
-    const items = ui.model[t.id] || [];
+    const items = (ui.model[t.id] || []).filter((f) => triagePass(f, t.id)); // "To review" counts what's left
     const n = items.length;
     if (t.optional && !n && ui.tab !== t.id) continue;
     let cls = n ? 'count' : 'count zero';
@@ -848,7 +1023,42 @@ function renderToolbar() {
   $('#interestingWrap').hidden = !INTERESTING_TABS.has(t);
   $('#absWrap').hidden = t !== 'endpoints' && t !== 'api';
   $('#liveWrap').hidden = t !== 'domains';
+  $('#inScopeWrap').hidden = t !== 'domains' || !scoped();
   $('#newWrap').hidden = !ui.data?.changes?.length || t === 'files';
+  $('#triageFilter').hidden = t === 'files';
+  $('#triageFilter').value = ui.triage;
+}
+
+// ── bulk triage: two clicks mark every row shown (or clear their status when a status is filtered) ──
+
+let triageArmed = 0;
+function renderTriageButton() {
+  const b = $('#btnTriage');
+  const n = ui.tab === 'files' ? 0 : ui.visible.length;
+  b.hidden = !n;
+  if (!n) return;
+  const clearing = ui.triage !== 'all' && ui.triage !== 'todo';
+  const armed = Date.now() - triageArmed < 6000;
+  b.classList.toggle('primary', armed);
+  b.lastChild.textContent = armed ? ` ${clearing ? 'Clear' : 'Mark'} ${n}? Click again` : clearing ? ' Clear status' : ' Mark reviewed';
+  b.title = clearing ? `Clear the status of the ${n} rows shown` : `Mark the ${n} rows shown as reviewed (two clicks)`;
+}
+
+async function bulkTriage() {
+  const items = ui.tab === 'files' ? [] : [...ui.visible];
+  if (!items.length) return;
+  if (Date.now() - triageArmed > 6000) {
+    triageArmed = Date.now();
+    renderTriageButton();
+    setTimeout(() => {
+      if (triageArmed && Date.now() - triageArmed >= 6000) renderTriageButton();
+    }, 6100);
+    return;
+  }
+  triageArmed = 0;
+  const clearing = ui.triage !== 'all' && ui.triage !== 'todo';
+  await setTriage(items, clearing ? null : 'reviewed');
+  toast(`${clearing ? 'Cleared' : 'Marked'} ${items.length} row${items.length === 1 ? '' : 's'}${clearing ? '' : ' reviewed'}`);
 }
 
 /** "Changed 2 h ago: main.4f2a.js → main.9b8c.js · 12 new" with a button for the New filter. */
@@ -882,6 +1092,30 @@ function renderChangeBanner() {
   el.hidden = false;
 }
 
+// ── program scope: is the host shown in scope? ──
+
+const SCOPE_CHIP = {
+  in: ['in scope', 'scope-in', 'Listed in the program scope: active checks may be sent to it'],
+  out: ['out of scope', 'scope-out', 'Excluded by the program scope: active checks are never sent to it'],
+  unlisted: ['not in scope', 'scope-unlisted', 'Not listed in the program scope: treated as out of scope for active checks'],
+};
+
+/** 'in' / 'out' / 'unlisted' for the host shown, or null (no scope set, or the program view). */
+const shownScope = () => (scoped() && ui.host && !isProgram() ? hostScope(ui.scope, ui.host) : null);
+
+function renderScopeChip() {
+  const el = $('#scopeChip');
+  const st = shownScope();
+  // in scope is the normal case: a green status dot says it; out of scope / not listed get a chip
+  $('#status').classList.toggle('in-scope', st === 'in');
+  el.hidden = !st || st === 'in';
+  if (el.hidden) return;
+  const [text, cls, title] = SCOPE_CHIP[st];
+  el.className = `chip ${cls}`;
+  el.textContent = text;
+  el.title = `${title} (Settings → Program scope)`;
+}
+
 // ── "Ask first": the site in this tab waits for the user's OK before anything is scanned ──
 
 async function refreshAsk() {
@@ -909,6 +1143,14 @@ function askButtons(kind) {
   ];
 }
 
+/** "in scope" / "out of scope" for the site waiting for an OK, when a program scope is set. */
+function askScopeChip() {
+  const st = ui.ask?.program;
+  if (!st) return null;
+  const [text, cls, title] = SCOPE_CHIP[st];
+  return h('span', { class: `chip ${cls}`, title }, text);
+}
+
 function renderAskBanner() {
   const el = $('#askBanner');
   const show = askingHere() && !!ui.data;
@@ -916,6 +1158,7 @@ function renderAskBanner() {
   if (show) {
     el.replaceChildren(
       h('span', {}, h('b', {}, `Not scanning ${ui.ask.host} in this tab.`), ' Findings below are from an earlier scan.'),
+      askScopeChip(),
       h('span', { class: 'spacer' }),
       ...askButtons('mini'),
     );
@@ -948,9 +1191,13 @@ function render() {
   renderChangeBanner();
   renderAskBanner();
   renderDomainBar();
+  renderScopeChip();
   const list = $('#list');
   const scroll = list.scrollTop;
   list.replaceChildren();
+  ui.visible = [];
+  ui.itemsByKey = new Map();
+  renderTriageButton();
 
   if (!ui.host) {
     list.append(emptyState('No website in this tab', 'Open a site to scan it, or pick a previously scanned host above.'));
@@ -958,8 +1205,15 @@ function render() {
     return;
   }
   if (!ui.data) {
+    if (isProgram()) {
+      list.append(emptyState('No in-scope host scanned yet', 'Browse the program\'s sites: every scanned host that Settings → Program scope covers is merged here.'));
+      $('#count').textContent = '';
+      return;
+    }
     if (askingHere()) {
       const card = emptyState(`Scan ${ui.ask.host}?`, 'JS Recon asks before scanning a site. Nothing has been fetched from it yet.');
+      const sc = askScopeChip();
+      if (sc) card.append(sc);
       card.append(h('div', { class: 'ask-actions' }, ...askButtons('btn')));
       list.append(card);
     } else list.append(emptyState(`Nothing scanned for ${ui.host} yet`, 'Reload the page or press Rescan. Scripts are captured as the page loads them.'));
@@ -969,10 +1223,17 @@ function render() {
 
   const items = filtered(ui.tab);
   ui.visible = items;
+  if (ui.tab !== 'files') for (const f of items) if (f.key) ui.itemsByKey.set(f.key, f);
+  renderTriageButton();
   const total = (ui.model[ui.tab] || []).length;
   $('#count').textContent = items.length === total ? `${total}` : `${items.length} / ${total}`;
   if (!items.length) {
-    list.append(total ? emptyState('No matches', 'Nothing matches the current filters.') : emptyState(null, EMPTY[ui.tab]));
+    const allDone = total && ui.triage === 'todo' && (ui.model[ui.tab] || []).every((f) => f.triage);
+    list.append(
+      allDone ? emptyState('All reviewed', 'Every row in this tab has a status. Set Status to “Any status” to see them again.')
+      : total ? emptyState('No matches', 'Nothing matches the current filters.')
+      : emptyState(null, EMPTY[ui.tab]),
+    );
     return;
   }
   const make = ROW[ui.tab];
@@ -981,7 +1242,8 @@ function render() {
   for (const f of items.slice(0, ui.limit)) {
     if (GROUPED.has(ui.tab) && f.label !== last) frag.append(h('div', { class: 'group' }, f.label));
     last = f.label;
-    frag.append(make(f));
+    const row = make(f);
+    frag.append(ui.tab === 'files' ? row : decorateTriage(row, f));
   }
   if (items.length > ui.limit) {
     frag.append(h('button', { class: 'btn more', onclick: () => ((ui.limit = Infinity), render()) }, `Show all ${items.length} (${items.length - ui.limit} more)`));
@@ -1009,6 +1271,9 @@ function renderHostSelect() {
     const sec = s ? (s.critical || 0) + (s.high || 0) + (s.medium || 0) : 0;
     return sec ? `${host}  ·  ${sec} finding${sec > 1 ? 's' : ''}` : host;
   };
+  // with a program scope: one entry that merges every scanned in-scope host
+  const inScope = scoped() ? hosts.filter(([host]) => hostScope(ui.scope, host) === 'in').length : 0;
+  if (inScope || isProgram()) sel.append(h('option', { value: PROGRAM }, `All in-scope hosts (${inScope})`));
   if (ui.tabHost && !ui.index[ui.tabHost]) sel.append(h('option', { value: ui.tabHost }, `${ui.tabHost} (current tab)`));
   if (ui.host && ui.host !== ui.tabHost && !ui.index[ui.host]) sel.append(h('option', { value: ui.host }, ui.host));
   for (const [host, s] of hosts) sel.append(h('option', { value: host }, label(host, s)));
@@ -1017,23 +1282,53 @@ function renderHostSelect() {
   renderDumpHosts();
 }
 
+/** Every scanned host the program scope covers, merged (see ui/program.js). */
+async function loadProgram() {
+  const all = await chrome.storage.local.get(null);
+  const list = Object.keys(all)
+    .filter((k) => k.startsWith('host:') && hostScope(ui.scope, k.slice(5)) === 'in')
+    .map((k) => ({ host: k.slice(5), data: all[k] }));
+  return list.length ? mergeHosts(list) : null;
+}
+
 async function loadHost(host) {
   ui.host = host || null;
   ui.expanded.clear();
   ui.limit = 400;
-  if (host) {
+  if (host === PROGRAM) ui.data = await loadProgram();
+  else if (host) {
     const r = await chrome.storage.local.get('host:' + host);
     ui.data = r['host:' + host] || null;
   } else ui.data = null;
   ui.model = buildModel(ui.data);
+  document.body.classList.toggle('program', isProgram());
   if (FULL) {
     const u = new URL(location.href);
     if (host) u.searchParams.set('host', host);
     history.replaceState(null, '', u);
-    document.title = host ? `JS Recon — ${host}` : 'JS Recon';
-    $('#manualHost').placeholder = host || '(derived from URL)';
+    document.title = isProgram() ? 'JS Recon — all in-scope hosts' : host ? `JS Recon — ${host}` : 'JS Recon';
+    $('#manualHost').placeholder = isProgram() ? '(derived from URL)' : host || '(derived from URL)';
   }
   render();
+  pollStatus();
+}
+
+/** Per-host actions (rescan, live checks, crt.sh, Wayback …) need one host, not the merged view. */
+function needsOneHost() {
+  if (!isProgram()) return false;
+  toast('Pick a single host for this: the program view merges several');
+  return true;
+}
+
+let programTimer = null;
+function scheduleProgramReload() {
+  clearTimeout(programTimer);
+  programTimer = setTimeout(async () => {
+    if (!isProgram()) return;
+    ui.data = await loadProgram();
+    ui.model = buildModel(ui.data);
+    render();
+  }, 1200);
 }
 
 async function pollStatus() {
@@ -1044,14 +1339,19 @@ async function pollStatus() {
     /* worker starting */
   }
   const el = $('#status');
-  if (st?.pending) {
-    el.className = 'status busy';
+  el.classList.toggle('in-scope', shownScope() === 'in');
+  if (isProgram()) {
+    el.classList.remove('busy');
+    el.textContent = ui.data ? `${ui.data.hosts.length} hosts · ${Object.keys(ui.data.files).length} files` : 'No in-scope host scanned yet';
+  } else if (st?.pending) {
+    el.classList.add('busy');
     el.textContent = `Scanning · ${st.pending} queued`;
   } else if (ui.data) {
-    el.className = 'status';
+    el.classList.remove('busy');
     const s = Math.round((Date.now() - (ui.data.updated || Date.now())) / 1000);
     el.textContent = `${Object.keys(ui.data.files).length} files · ${s < 60 ? s + 's' : Math.round(s / 60) + 'm'} ago`;
   } else el.textContent = '';
+  el.title = el.textContent + (el.classList.contains('in-scope') ? ' · in the program scope' : '');
 }
 
 function renderPause() {
@@ -1114,6 +1414,7 @@ function openDump() {
 // ───────────────────────── content search ─────────────────────────
 
 function openSearch() {
+  if (needsOneHost()) return;
   if (!FULL) {
     chrome.tabs.create({ url: chrome.runtime.getURL(`ui/popup.html?view=full&find=1${ui.host ? '&host=' + encodeURIComponent(ui.host) : ''}`) });
     window.close();
@@ -1188,7 +1489,8 @@ async function runSearch() {
 
 function exportJson(data) {
   return {
-    host: data.host,
+    host: data.program ? 'program' : data.host,
+    ...(data.program ? { programHosts: data.hosts } : {}),
     origin: data.origin,
     updated: new Date(data.updated).toISOString(),
     files: Object.values(data.files),
@@ -1196,7 +1498,20 @@ function exportJson(data) {
     chunks: Object.keys(data.chunkUrls || {}),
     hosts: data.hostChecks || {},
     wildcard: data.hostWildcard || null,
+    triage: data.triage || {},
   };
+}
+
+/** Rows marked false positive stay out of the reports and SARIF. */
+const reportable = (list) => list.filter((f) => f.triage !== 'fp');
+const triageNote = (f) => (f.triage === 'reported' ? ' [reported]' : f.triage === 'reviewed' ? ' [reviewed]' : '');
+
+/** "jquery 3.4.1 · 6 advisories · fixed in 3.5.0 · CVE-…" / npm package line, for the reports. */
+function depLine(f) {
+  if (f.meta?.kind !== 'library') return `${f.value}\t${f.label}${f.meta?.latest ? '\tv' + f.meta.latest : ''}`;
+  const n = f.meta.advisories || 0;
+  const fix = f.meta.eol ? 'end of life, no fixed release' : `fixed in ${f.meta['fixed in']}`;
+  return n ? `${f.value}\t${n} advisor${n === 1 ? 'y' : 'ies'}, ${fix}${f.meta.ids ? '\t' + f.meta.ids : ''}` : `${f.value}\tno known advisories`;
 }
 
 /** Same-site subdomains with a high / medium rating, best first. */
@@ -1220,24 +1535,24 @@ function liveHostUrls() {
 
 function textReport() {
   const m = ui.model;
-  const out = [`# JS Recon — ${ui.host}`, `# ${new Date().toISOString()}`, ''];
+  const out = [`# JS Recon — ${isProgram() ? `all in-scope hosts (${ui.data.hosts.join(', ')})` : ui.host}`, `# ${new Date().toISOString()}`, ''];
   const section = (title, lines) => {
     if (!lines.length) return;
     out.push(`## ${title} (${lines.length})`, ...lines, '');
   };
-  section('Secrets', m.secrets.map((f) => `[${f.severity.toUpperCase()}${f.confidence ? '/' + f.confidence : ''}] ${f.label}: ${f.value}  (${f.sources.map(srcLabel).join(', ')})`));
+  section('Secrets', reportable(m.secrets).map((f) => `[${f.severity.toUpperCase()}${f.confidence ? '/' + f.confidence : ''}] ${f.label}: ${f.value}  (${f.sources.map(srcLabel).join(', ')})${triageNote(f)}`));
   const bodyNote = (f) => (f.meta?.body ? `  {${f.meta.body}}` : '') + (f.tags?.includes('idor') ? '  [idor]' : '');
   section('API endpoints', m.api.map((f) => (f.meta?.graphql ? `${apiParts(f).method} ${apiParts(f).path} (GraphQL)` : `${apiParts(f).method} ${resolveUrl(apiParts(f).path)}${bodyNote(f)}`)));
   section('Endpoints', m.endpoints.filter((f) => !f.tags.includes('noise')).map((f) => f.value));
   section('URLs', m.urls.filter((f) => !f.tags.includes('noise')).map((f) => f.value));
   section('High-value targets', valuedHosts().map((d) => `[${d.rating.level.toUpperCase()}] ${d.value}\t${hostStatus(d)}\t${d.rating.reasons.join('; ')}`));
   section('Domains', m.domains.map((d) => `${d.value}\t${d.tags.join(',')}${hostStatus(d) ? '\t' + hostStatus(d) : ''}`));
-  section('Cloud', m.cloud.map((f) => `[${f.severity}] ${f.label}: ${f.value}`));
+  section('Cloud', reportable(m.cloud).map((f) => `[${f.severity}] ${f.label}: ${f.value}${triageNote(f)}`));
   section('Parameters', m.params.map((p) => (p.kind === 'query' ? p.value : `${p.value}\t(${p.kind})`)));
-  section('Dependencies', m.deps.map((f) => `[${f.severity.toUpperCase()}] ${f.value}\t${f.label}${f.meta?.latest ? '\tv' + f.meta.latest : ''}`));
-  section('Intel', m.intel.map((f) => `[${f.severity}] ${f.label}: ${f.value}`));
+  section('Dependencies', reportable(m.deps).map((f) => `[${f.severity.toUpperCase()}] ${depLine(f)}${triageNote(f)}`));
+  section('Intel', reportable(m.intel).map((f) => `[${f.severity}] ${f.label}: ${f.value}${triageNote(f)}`));
   section('Routes', m.routes.map((f) => `${f.value}${f.tags.length ? '\t[' + f.tags.join(',') + ']' : ''}${f.meta?.component ? '\t→ ' + f.meta.component : ''}`));
-  section('Sinks', m.sinks.map((f) => `${f.label}: ${f.value}  (${f.sources.map(srcLabel).join(', ')})`));
+  section('Sinks', reportable(m.sinks).map((f) => `${f.label}: ${f.value}  (${f.sources.map(srcLabel).join(', ')})${triageNote(f)}`));
   section('Lazy chunks (from the bundler runtime)', Object.keys(ui.data?.chunkUrls || {}).sort());
   section('Files', m.files.map((f) => `${f.kind}\t${f.url}${f.error ? '\t' + f.error : ''}`));
   return out.join('\n');
@@ -1248,20 +1563,20 @@ function mdReport() {
   const m = ui.model;
   const esc = (s) => String(s ?? '').replace(/\|/g, '\\|').replace(/\s+/g, ' ').trim();
   const tagsOf = (f) => (f.tags?.length ? ` _(${f.tags.join(', ')})_` : '');
-  const out = [`# JS Recon — ${ui.host}`, '', `_Generated ${new Date().toISOString()}_`, ''];
+  const out = [`# JS Recon — ${isProgram() ? 'all in-scope hosts' : ui.host}`, '', ...(isProgram() ? [`_Hosts: ${ui.data.hosts.join(', ')}_`, ''] : []), `_Generated ${new Date().toISOString()}_`, ''];
   const section = (title, rows) => {
     if (rows.length) out.push(`## ${title} (${rows.length})`, '', ...rows, '');
   };
-  section('Secrets', m.secrets.map((f) => `- **[${f.severity}${f.confidence ? '/' + f.confidence : ''}]** ${esc(f.label)}: \`${esc(f.value)}\`${tagsOf(f)}`));
-  section('DOM-XSS sinks', m.sinks.map((f) => `- ${esc(f.label)}: \`${esc(f.value)}\``));
+  section('Secrets', reportable(m.secrets).map((f) => `- **[${f.severity}${f.confidence ? '/' + f.confidence : ''}]** ${esc(f.label)}: \`${esc(f.value)}\`${tagsOf(f)}${triageNote(f)}`));
+  section('DOM-XSS sinks', reportable(m.sinks).map((f) => `- ${esc(f.label)}: \`${esc(f.value)}\`${triageNote(f)}`));
   section('API endpoints', m.api.map((f) =>
     `- \`${apiParts(f).method} ${esc(f.meta?.graphql ? apiParts(f).path + ' (GraphQL)' : resolveUrl(apiParts(f).path))}\`` +
     (f.meta?.body && !f.meta?.graphql ? ` — body: ${bodyFields(f.meta).map((n) => `\`${esc(n)}\``).join(', ')}` : '') +
     (f.tags?.includes('idor') ? ' _(idor)_' : '')));
   section('Routes', m.routes.map((f) => `- \`${esc(f.value)}\`${tagsOf(f)}`));
-  section('Cloud', m.cloud.map((f) => `- **[${f.severity}]** ${esc(f.label)}: \`${esc(f.value)}\``));
-  section('Dependencies', m.deps.map((f) => `- **[${f.severity}]** \`${esc(f.value)}\` — ${esc(f.label)}`));
-  section('Intel', m.intel.map((f) => `- **[${f.severity}]** ${esc(f.label)}: ${esc(f.value)}`));
+  section('Cloud', reportable(m.cloud).map((f) => `- **[${f.severity}]** ${esc(f.label)}: \`${esc(f.value)}\`${triageNote(f)}`));
+  section('Dependencies', reportable(m.deps).map((f) => `- **[${f.severity}]** \`${esc(f.value)}\` — ${esc(f.meta?.kind === 'library' ? depLine(f).split('\t').slice(1).join(' · ') : f.label)}${triageNote(f)}`));
+  section('Intel', reportable(m.intel).map((f) => `- **[${f.severity}]** ${esc(f.label)}: ${esc(f.value)}${triageNote(f)}`));
   section('High-value targets', valuedHosts().map((d) => `- **[${d.rating.level}]** \`${esc(d.value)}\`${hostStatus(d) ? ` — ${esc(hostStatus(d))}` : ''} — ${esc(d.rating.reasons.join('; '))}`));
   section('Domains', m.domains.map((d) => `- \`${esc(d.value)}\`${hostStatus(d) ? ` ${esc(hostStatus(d))}` : ''}${tagsOf(d)}`));
   return out.join('\n');
@@ -1276,11 +1591,11 @@ function sarifModel() {
       .filter((l) => l.uri);
   const findings = [];
   for (const tab of ['secrets', 'sinks', 'intel', 'cloud', 'deps']) {
-    for (const f of m[tab] || []) {
+    for (const f of reportable(m[tab] || [])) {
       findings.push({ rule: f.rule || tab, label: f.label || tab, severity: f.severity || 'info', value: f.value, category: f.category || tab, desc: f.desc, locations: loc(f) });
     }
   }
-  return { host: ui.host, version: chrome.runtime.getManifest().version, findings };
+  return { host: hostLabel(), version: chrome.runtime.getManifest().version, findings };
 }
 
 /** Endpoint + API paths of the current host (relative or absolute, noise and static files excluded). */
@@ -1320,14 +1635,14 @@ function exportGraphql() {
   if (!ops.length) return toast('No GraphQL operations found');
   const defs = [...ops, ...frags].map((f) => parseDefinition(f.meta.document)).filter(Boolean);
   const text = [
-    `# ${ui.host} · GraphQL endpoint: ${graphqlEndpoint()}`,
+    `# ${hostLabel()} · GraphQL endpoint: ${graphqlEndpoint()}`,
     '',
     schemaSketch(defs),
     '# ─── Operations and fragments found in the client ───',
     '',
     ...[...ops, ...frags].map((f) => f.meta.document + '\n'),
   ].join('\n');
-  download(`jsrecon-${safeName(ui.host)}-${stamp()}.graphql`, text);
+  download(`jsrecon-${safeName(hostLabel())}-${stamp()}.graphql`, text);
   toast(`${ops.length} operations, ${frags.length} fragments`);
 }
 
@@ -1341,7 +1656,14 @@ function replayUrls() {
   ]
     .map(resolveUrl)
     .filter(isHttp);
-  return replayCandidates(urls, siteOf, ui.host);
+  return inScopeUrls(replayCandidates(urls, siteOf, ui.host));
+}
+
+/** With a program scope, only URLs it covers are sent (the worker checks again). */
+function inScopeUrls(r) {
+  if (!scoped()) return r;
+  const urls = r.urls.filter((u) => urlScope(ui.scope, u) === 'in');
+  return { urls, skipped: { ...r.skipped, scope: r.urls.length - urls.length } };
 }
 
 let replayArmed = 0;
@@ -1349,12 +1671,13 @@ const REPLAY_LABEL = 'Send GET URLs to proxy… ';
 
 /** Two clicks: the first shows how many requests would be sent, the second sends them. */
 async function runReplay() {
+  if (needsOneHost()) return;
   if (!ui.data) return toast('Nothing to send');
   const { urls, skipped } = replayUrls();
   const item = $('#replayItem');
   if (!urls.length) {
     $('#exportMenu').open = false;
-    return toast('No concrete GET URLs for this host');
+    return toast(skipped.scope ? `No in-scope GET URLs (${skipped.scope} out of scope)` : 'No concrete GET URLs for this host');
   }
   if (Date.now() - replayArmed > 6000) {
     replayArmed = Date.now();
@@ -1370,7 +1693,8 @@ async function runReplay() {
   const r = await chrome.runtime.sendMessage({ type: 'replay', host: ui.host, urls });
   if (!r?.ok) return toast(r?.error || 'Failed');
   const skip = skipped.unsafe + skipped.template;
-  toast(`Sending ${r.queued} GET requests${skip ? ` · skipped ${skip} (placeholders / state-changing)` : ''}`);
+  const oos = skipped.scope || 0;
+  toast(`Sending ${r.queued} GET requests${skip ? ` · skipped ${skip} (placeholders / state-changing)` : ''}${oos ? ` · ${oos} out of scope` : ''}`);
   pollStatus();
 }
 
@@ -1379,7 +1703,7 @@ const absoluteUrls = () => [...new Set(endpointPaths().map(resolveUrl).filter((u
 // ── endpoint liveness (opt-in, same-site) ──
 function probeUrls() {
   const urls = [...absoluteUrls(), ...routePaths().map(resolveUrl)].filter(isHttp);
-  return replayCandidates(urls, siteOf, ui.host);
+  return inScopeUrls(replayCandidates(urls, siteOf, ui.host));
 }
 
 let probeArmed = 0;
@@ -1387,12 +1711,13 @@ const PROBE_LABEL = 'Check which endpoints are live… ';
 
 /** Two clicks, same safe same-site GET candidates as the proxy sender, but the status is recorded. */
 async function runProbe() {
+  if (needsOneHost()) return;
   if (!ui.data) return toast('Nothing to probe');
   const { urls, skipped } = probeUrls();
   const item = $('#probeItem');
   if (!urls.length) {
     $('#exportMenu').open = false;
-    return toast('No concrete same-site GET URLs for this host');
+    return toast(skipped.scope ? `No in-scope GET URLs (${skipped.scope} out of scope)` : 'No concrete same-site GET URLs for this host');
   }
   if (Date.now() - probeArmed > 6000) {
     probeArmed = Date.now();
@@ -1407,7 +1732,7 @@ async function runProbe() {
   $('#exportMenu').open = false;
   const r = await chrome.runtime.sendMessage({ type: 'probe', host: ui.host, urls });
   if (!r?.ok) return toast(r?.error || 'Failed');
-  const skip = skipped.unsafe + skipped.template + (r.skipped?.limit || 0);
+  const skip = skipped.unsafe + skipped.template + (skipped.scope || 0) + (r.skipped?.limit || 0);
   toast(`Probing ${r.queued} same-site endpoint${r.queued === 1 ? '' : 's'}${skip ? ` · skipped ${skip}` : ''}`);
   pollStatus();
 }
@@ -1416,7 +1741,7 @@ async function runProbe() {
 
 /** Same-site subdomains in the Domains tab, high-value names first (the check is capped). */
 function subdomainTargets() {
-  return ui.model.domains.filter((d) => d.tags.includes('same-site') && !d.value.includes('*')).map((d) => d.value);
+  return ui.model.domains.filter((d) => d.tags.includes('same-site') && !d.value.includes('*') && (!scoped() || d.scope === 'in')).map((d) => d.value);
 }
 
 let hostsArmed = 0;
@@ -1434,8 +1759,10 @@ function renderDomainBar() {
   const medium = n((d) => d.rating?.level === 'medium');
   const pending = n((d) => d.check?.pending);
   const wild = n((d) => d.tags.includes('wildcard'));
+  const inScope = scoped() ? n((d) => d.scope === 'in') : null;
   const armed = Date.now() - hostsArmed < 6000;
-  const total = Math.min(own.length, 500);
+  const total = Math.min(subdomainTargets().length, 500);
+  const one = !isProgram();
   el.replaceChildren(
     h(
       'span',
@@ -1445,14 +1772,15 @@ function renderDomainBar() {
       high ? ` · ${high} high value` : '',
       medium ? ` · ${medium} medium` : '',
       wild ? ` · ${wild} wildcard` : '',
+      inScope != null ? ` · ${inScope} in scope` : '',
       pending ? ` · checking ${pending}…` : '',
     ),
     h('span', { class: 'spacer' }),
-    btn(ctBusy ? 'Asking crt.sh…' : 'Find more (crt.sh)', 'Look up subdomains in certificate-transparency logs. Sends the domain name to crt.sh, nothing to the target.', runCt),
-    own.length
+    one ? btn(ctBusy ? 'Asking crt.sh…' : 'Find more (crt.sh)', 'Look up subdomains in certificate-transparency logs. Sends the domain name to crt.sh, nothing to the target.', runCt) : null,
+    one && total
       ? btn(
           armed ? `GET / on ${total} host${total === 1 ? '' : 's'}? Click again` : 'Check live…',
-          'Sends one GET / (HTTPS, then HTTP, no cookies) to each subdomain of this site, max 500, and a made-up one to detect wildcard DNS. Records status, title, server and takeover signatures. Deny-listed hosts are skipped. Active: sends requests to the target.',
+          `Sends one GET / (HTTPS, then HTTP, no cookies) to each subdomain of this site${scoped() ? ' that the program scope lists' : ''}, max 500, and a made-up one to detect wildcard DNS. Records status, title, server and takeover signatures. Deny-listed hosts are skipped. Active: sends requests to the target.`,
           runHostProbe,
           armed ? 'primary' : '',
         )
@@ -1461,7 +1789,7 @@ function renderDomainBar() {
 }
 
 async function runCt() {
-  if (!ui.host || ctBusy) return;
+  if (!ui.host || ctBusy || needsOneHost()) return;
   ctBusy = true;
   renderDomainBar();
   let r = null;
@@ -1478,8 +1806,9 @@ async function runCt() {
 
 /** Two clicks: the first shows how many hosts would be contacted, the second sends the requests. */
 async function runHostProbe() {
+  if (needsOneHost()) return;
   const hosts = subdomainTargets();
-  if (!hosts.length) return toast('No subdomains of this site yet');
+  if (!hosts.length) return toast(scoped() ? 'No in-scope subdomains of this site yet' : 'No subdomains of this site yet');
   if (Date.now() - hostsArmed > 6000) {
     hostsArmed = Date.now();
     renderDomainBar();
@@ -1492,8 +1821,8 @@ async function runHostProbe() {
   const r = await chrome.runtime.sendMessage({ type: 'probe-hosts', host: ui.host, hosts });
   renderDomainBar();
   if (!r?.ok) return toast(r?.error || 'Failed');
-  const skip = (r.skipped?.denied || 0) + (r.skipped?.limit || 0);
-  toast(`Checking ${r.queued} host${r.queued === 1 ? '' : 's'}${skip ? ` · skipped ${skip} (deny-list / limit)` : ''}`);
+  const skip = (r.skipped?.denied || 0) + (r.skipped?.limit || 0) + (r.skipped?.scope || 0);
+  toast(`Checking ${r.queued} host${r.queued === 1 ? '' : 's'}${skip ? ` · skipped ${skip} (deny-list / scope / limit)` : ''}`);
   pollStatus();
 }
 
@@ -1593,9 +1922,9 @@ async function exportWordlists() {
     written.push(`${name.padEnd(22)}${String(lines.length).padStart(6)}  ${desc}`);
   }
   if (!written.length) return toast('Nothing to export');
-  const h = ui.host;
+  const h = isProgram() ? ui.data.hosts[0] || 'TARGET' : ui.host;
   const readme = [
-    `JS Recon wordlists for ${h} (${new Date().toISOString().slice(0, 16).replace('T', ' ')})`,
+    `JS Recon wordlists for ${isProgram() ? `all in-scope hosts (${ui.data.hosts.join(', ')})` : h} (${new Date().toISOString().slice(0, 16).replace('T', ' ')})`,
     '',
     ...written,
     '',
@@ -1612,13 +1941,14 @@ async function exportWordlists() {
     '',
   ].join('\n');
   await zip.add('README.txt', readme);
-  downloadBlob(`jsrecon-${safeName(h)}-wordlists-${stamp()}.zip`, zip.blob());
+  downloadBlob(`jsrecon-${safeName(hostLabel())}-wordlists-${stamp()}.zip`, zip.blob());
   toast(`${written.length} wordlists`);
 }
 
 /** Historical JS and source maps of this host from the Wayback Machine (sends the host name to web.archive.org). */
 async function runWayback() {
   $('#exportMenu').open = false;
+  if (needsOneHost()) return;
   if (!ui.host) return toast('Open a site first');
   toast('Asking the Wayback Machine…');
   const r = await chrome.runtime.sendMessage({ type: 'wayback', host: ui.host });
@@ -1640,7 +1970,7 @@ async function doExport(kind) {
     return download(`jsrecon-all-${stamp()}.json`, JSON.stringify(hosts, null, 2), 'application/json');
   }
   if (!ui.data) return toast('Nothing to export');
-  const base = `jsrecon-${safeName(ui.host)}`;
+  const base = `jsrecon-${safeName(hostLabel())}`;
   if (kind === 'json') download(`${base}-${stamp()}.json`, JSON.stringify(exportJson(ui.data), null, 2), 'application/json');
   if (kind === 'txt') download(`${base}-${stamp()}.txt`, textReport());
   if (kind === 'md') download(`${base}-${stamp()}.md`, mdReport(), 'text/markdown');
@@ -1693,7 +2023,16 @@ function bind() {
   bindCheckbox('#onlyNew', 'onlyNew', false);
   bindCheckbox('#absolute', 'absolute');
   bindCheckbox('#onlyLive', 'onlyLive', false);
+  bindCheckbox('#onlyInScope', 'onlyInScope', false);
   $('#btnCopy').addEventListener('click', copyVisible);
+  $('#btnTriage').addEventListener('click', bulkTriage);
+  $('#triageFilter').addEventListener('change', (e) => {
+    ui.triage = e.target.value;
+    store.set('triage', ui.triage);
+    ui.limit = 400;
+    triageArmed = 0;
+    render();
+  });
 
   $('#btnPause').addEventListener('click', async () => {
     ui.settings = await saveSettings({ enabled: !(ui.settings?.enabled !== false) });
@@ -1701,7 +2040,7 @@ function bind() {
   });
 
   $('#btnRescan').addEventListener('click', async () => {
-    if (!ui.host) return;
+    if (!ui.host || needsOneHost()) return;
     if (askingHere()) return decide('tab'); // pressing Rescan on an unapproved tab is the OK for this tab
     const tabId = ui.tabHost === ui.host ? ui.tabId : null;
     const r = await chrome.runtime.sendMessage({ type: 'rescan', host: ui.host, tabId });
@@ -1711,7 +2050,7 @@ function bind() {
 
   const clearBtn = $('#btnClear');
   clearBtn.addEventListener('click', async () => {
-    if (!ui.host) return;
+    if (!ui.host || needsOneHost()) return;
     if (!clearBtn.classList.contains('confirm')) {
       clearBtn.classList.add('confirm');
       setTimeout(() => clearBtn.classList.remove('confirm'), 3000);
@@ -1773,7 +2112,7 @@ function bind() {
   $('#btnScanCode').addEventListener('click', async () => {
     const text = $('#manualInput').value;
     if (!text.trim()) return;
-    const host = $('#manualHost').value.trim() || ui.host || 'manual';
+    const host = $('#manualHost').value.trim() || (isProgram() ? null : ui.host) || 'manual';
     await chrome.runtime.sendMessage({ type: 'scan-text', host, text, label: `Pasted code (${formatBytes(text.length)})` });
     $('#manualMsg').textContent = `Scanned into “${host}”.`;
     if (host !== ui.host) setTimeout(() => loadHost(host).then(refreshIndex), 800);
@@ -1781,7 +2120,9 @@ function bind() {
 
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local') return;
-    if (ui.host && changes['host:' + ui.host]) {
+    if (isProgram()) {
+      if (Object.keys(changes).some((k) => k.startsWith('host:') && hostScope(ui.scope, k.slice(5)) === 'in')) scheduleProgramReload();
+    } else if (ui.host && changes['host:' + ui.host]) {
       ui.data = changes['host:' + ui.host].newValue || null;
       scheduleRender();
     }
@@ -1791,6 +2132,10 @@ function bind() {
     }
     if (changes.settings) {
       ui.settings = { ...ui.settings, ...(changes.settings.newValue || {}) };
+      ui.scope = compileScope(ui.settings.scopeIn, ui.settings.scopeOut);
+      ui.model = buildModel(ui.data);
+      renderHostSelect();
+      if (isProgram()) scheduleProgramReload();
       renderPause();
       refreshAsk().then(render);
     }
@@ -1805,6 +2150,7 @@ async function refreshIndex() {
 async function init() {
   bind();
   ui.settings = await getSettings();
+  ui.scope = compileScope(ui.settings.scopeIn, ui.settings.scopeOut);
   renderPause();
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });

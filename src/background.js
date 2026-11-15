@@ -11,6 +11,8 @@ import { sourceMapRef, decodeDataUri, parseSourceMap, mapEntries, cleanSourcePat
 import { findChunks } from './chunks.js';
 import { analyzeHeaders } from './headers.js';
 import { parseCtNames, hostCandidates, describeResponse } from './hosts.js';
+import { libraryFindings, licenseFileRef } from './libs.js';
+import { compileScope, hasScope, hostScope, urlScope } from './scope.js';
 
 const KEY = (host) => 'host:' + host;
 const MAX_SOURCES = 8;
@@ -26,7 +28,7 @@ let state = null;
 let readyPromise = null;
 
 function applySettings(settings) {
-  state = { settings, rules: buildRules(settings), hostRules: new Map() };
+  state = { settings, rules: buildRules(settings), hostRules: new Map(), scope: compileScope(settings.scopeIn, settings.scopeOut) };
   readyPromise = approvalsLoaded.then(() => state);
   syncRuntimeScript(settings);
   return state;
@@ -62,8 +64,14 @@ function dropApproval(tabId) {
 function awaitingApproval(u, s, tabId) {
   if (s.scopeMode !== 'ask' || tabId < 0) return false; // tabId -1: an explicit scan from the UI
   if (hostMatches(u.hostname, s.allowHosts) || hostMatches(u.hostname, s.denyHosts)) return false;
+  if (s.scopeAutoScan && hostScope(state?.scope, u.host) === 'in') return false; // the program's scope is the OK
   return approvedTabs.get(tabId) !== u.host;
 }
+
+/** Program scope set in Settings → Program scope: active requests only go to what it lists. */
+const scoped = () => hasScope(state?.scope);
+const urlInScope = (url) => !scoped() || urlScope(state.scope, url) === 'in';
+const hostInScope = (host) => !scoped() || hostScope(state.scope, host) === 'in';
 
 // ── runtime hooks (opt-in): src/runtime.js is registered into the page's own world only while enabled ──
 
@@ -156,8 +164,10 @@ function summarize(data) {
   let critical = 0;
   let high = 0;
   let medium = 0;
+  const triage = data.triage || {};
   for (const f of Object.values(data.findings)) {
     counts[f.category] = (counts[f.category] || 0) + 1;
+    if (triage[f.key]) continue; // reviewed / reported / false positive: no longer counts on the badge
     if (f.severity === 'critical') critical++;
     else if (f.category === 'secrets') {
       if (f.severity === 'high') high++;
@@ -244,7 +254,7 @@ function mergeFindings(data, results, src) {
       if (r.meta) f.meta = { ...r.meta };
       if (r.desc) f.desc = r.desc;
       if (r.confidence) Object.assign(f, { confidence: r.confidence, entropy: r.entropy });
-      if (r.severity === 'high' || r.severity === 'critical') alerts.push(f);
+      if ((r.severity === 'high' || r.severity === 'critical') && !data.triage?.[key]) alerts.push(f);
       src.newKeys?.push(key);
     } else if ((SEV_RANK[r.severity] || 0) > (SEV_RANK[f.severity] || 0)) {
       f.severity = r.severity;
@@ -432,6 +442,7 @@ async function runJob(job) {
   if (job.kind === 'replay') return replayRequest(job);
   if (job.kind === 'probe') return probeRequest(job);
   if (job.kind === 'hostprobe') return hostProbe(job);
+  if (job.kind === 'license') return scanLicense(job);
 }
 
 // ───────────────────────── scanners ─────────────────────────
@@ -475,6 +486,7 @@ async function scanExternal(job) {
   if (family) (data.families ||= {})[family] = { url, hash, ts: Date.now() };
 
   const results = analyze(res.text, rulesFor(host));
+  if (s.checkLibraries) results.push(...libraryFindings(res.text, url));
   const newKeys = [];
   file.count = mergeFindings(data, results, { file: url, newKeys });
   file.status = 'done';
@@ -487,6 +499,28 @@ async function scanExternal(job) {
   if (s.fetchSourceMaps || s.probeSourceMaps) handleSourceMapRef(job, res, data);
   if (s.crawlJs && (job.depth || 0) < 2) crawlReferences(job, results, data);
   discoverChunks(job, res.text, res.finalUrl || url, data);
+  // webpack / terser move the libraries' license banners (with their versions) into main.js.LICENSE.txt
+  const license = s.checkLibraries && licenseFileRef(res.text, res.finalUrl || url);
+  if (license && !(data.files[license] && !job.force)) enqueue({ kind: 'license', host, origin: job.origin, id: license, url: license, from: url, force: job.force });
+}
+
+// ── known-vulnerable libraries: the .LICENSE.txt file next to a bundle lists every bundled library
+//    with its version (the banners minifiers strip from the code). Same static-file fetch as a source map.
+
+async function scanLicense(job) {
+  const data = await getHost(job.host, job.origin);
+  if (data.files[job.url]?.status === 'done' && !job.force) return;
+  let res;
+  try {
+    res = await fetchText(job.url, { force: job.force, maxBytes: 4 * 1048576 });
+    if (looksLikeHtml(res)) throw new Error('HTML');
+  } catch {
+    return; // missing or an SPA fallback page: nothing to list
+  }
+  const results = libraryFindings(res.text, '');
+  data.files[job.url] = { url: job.url, kind: 'license', from: job.from, status: 'done', size: res.text.length, ts: Date.now(), count: mergeFindings(data, results, { file: job.url }) };
+  markDirty(job.host);
+  scheduleBadge(job.host);
 }
 
 // ── change alerts ──
@@ -579,6 +613,7 @@ async function scanText(job) {
   if (!job.force && (data.files[id]?.status === 'done' || data.hashes[hash])) return;
   data.hashes[hash] = id;
   const results = analyze(job.text, rulesFor(host));
+  if (state.settings.checkLibraries) results.push(...libraryFindings(job.text, ''));
   data.files[id] = {
     url: id,
     kind: job.textKind,
@@ -626,7 +661,7 @@ function handleSourceMapRef(job, res, data) {
     if (s.fetchSourceMaps) {
       enqueue({ kind: 'sourcemap', host: job.host, origin: job.origin, id: mapUrl, url: mapUrl, from: job.url, force: job.force });
     }
-  } else if (s.probeSourceMaps && /^https?:/i.test(job.url)) {
+  } else if (s.probeSourceMaps && /^https?:/i.test(job.url) && urlInScope(job.url)) {
     const candidates = probeCandidates(job.url);
     enqueue({ kind: 'sourcemap', host: job.host, origin: job.origin, id: candidates[0], url: candidates[0], candidates, from: job.url, probe: true, force: job.force });
   }
@@ -678,6 +713,11 @@ function processSourceMap(data, mapId, map, from, size, probed = false) {
     }
     if (typeof e.content !== 'string' || !e.content) continue;
     withContent++;
+    // library versions live in node_modules sources, so these are checked even when they aren't scanned
+    if (state.settings.checkLibraries && e.content.length <= maxLen) {
+      const libs = libraryFindings(e.content, '');
+      if (libs.length) count += mergeFindings(data, libs, { file: mapId, sub: cleanSourcePath(e.path) });
+    }
     if (skipNM && /(?:^|\/)node_modules\//.test(e.path)) continue;
     if (e.content.length > maxLen) continue;
     count += mergeFindings(data, analyze(e.content, rules), { file: mapId, sub: cleanSourcePath(e.path) });
@@ -816,10 +856,11 @@ const MAX_REPLAY = 500;
 async function replayToProxy({ host, urls }) {
   await ready();
   if (!host || !Array.isArray(urls)) return { ok: false, error: 'Nothing to send' };
-  const { urls: list, skipped } = replayCandidates(urls.slice(0, 10000).map(String), siteOf, host);
+  const { urls: all, skipped } = replayCandidates(urls.slice(0, 10000).map(String), siteOf, host);
+  const list = all.filter(urlInScope);
   const send = list.slice(0, MAX_REPLAY);
   for (const u of send) enqueue({ kind: 'replay', host, id: u, url: u });
-  return { ok: true, queued: send.length, skipped: { ...skipped, limit: list.length - send.length } };
+  return { ok: true, queued: send.length, skipped: { ...skipped, scope: all.length - list.length, limit: list.length - send.length } };
 }
 
 async function replayRequest(job) {
@@ -843,8 +884,10 @@ const MAX_PROBE = 300;
 async function probeEndpoints({ host, urls }) {
   await ready();
   if (!host || !Array.isArray(urls)) return { ok: false, error: 'Nothing to probe' };
-  const { urls: list, skipped } = replayCandidates(urls.slice(0, 10000).map(String), siteOf, host);
+  const { urls: all, skipped: skip } = replayCandidates(urls.slice(0, 10000).map(String), siteOf, host);
+  const list = all.filter(urlInScope);
   const send = list.slice(0, MAX_PROBE);
+  const skipped = { ...skip, scope: all.length - list.length };
   if (!send.length) return { ok: true, queued: 0, skipped: { ...skipped, limit: list.length - send.length } };
   const data = await getHost(host);
   data.probes ||= {};
@@ -888,7 +931,9 @@ async function probeHosts({ host, hosts }) {
   const site = siteOf(host.replace(/:\d+$/, ''));
   if (!site.includes('.') || /^[\d.]+$/.test(site)) return { ok: false, error: 'Not a domain name' };
   const deny = state.settings.denyHosts;
-  const { hosts: list, skipped } = hostCandidates(hosts.slice(0, 20000).map(String), site, siteOf, (n) => hostMatches(n, deny));
+  const { hosts: all, skipped } = hostCandidates(hosts.slice(0, 20000).map(String), site, siteOf, (n) => hostMatches(n, deny));
+  const list = all.filter(hostInScope); // with a program scope: only what it lists
+  skipped.scope = all.length - list.length;
   const send = list.slice(0, MAX_HOST_PROBES);
   if (!send.length) return { ok: true, queued: 0, skipped: { ...skipped, limit: 0 } };
   const data = await getHost(host);
@@ -901,7 +946,7 @@ async function probeHosts({ host, hosts }) {
   // wildcard DNS: if a name nobody registered answers, every name answers the same way
   const rnd = [...crypto.getRandomValues(new Uint8Array(6))].map((b) => b.toString(16).padStart(2, '0')).join('');
   const wild = `jsr-${rnd}.${site}`;
-  if (!hostMatches(wild, deny)) {
+  if (!hostMatches(wild, deny) && hostInScope(wild)) {
     data.hostWildcard = { pending: true, name: wild, at: Date.now() };
     enqueue({ kind: 'hostprobe', host, id: wild, target: wild, wildcard: true });
   }
@@ -1262,7 +1307,7 @@ function queueDependencyChecks(host, data, recheck = false) {
   if (!state.settings.checkNpm) return;
   let n = 0;
   for (const f of Object.values(data.findings)) {
-    if (f.category !== 'deps') continue;
+    if (f.category !== 'deps' || f.meta?.kind === 'library') continue;
     if (f.meta?.npm && !(recheck && f.meta.npm === 'unknown')) continue;
     if (++n > MAX_DEP_CHECKS_PER_HOST) break;
     enqueue({ kind: 'npm', host, id: f.value, name: f.value });
@@ -1661,7 +1706,7 @@ async function scopeState(msg, sender) {
     return { state: 'off' };
   }
   if (u.protocol !== 'http:' && u.protocol !== 'https:') return { state: 'off' };
-  const base = { host: u.host, hostname: u.hostname, mode: settings.scopeMode };
+  const base = { host: u.host, hostname: u.hostname, mode: settings.scopeMode, program: hostScope(state.scope, u.host) };
   if (!settings.enabled) return { ...base, state: 'off' };
   if (awaitingApproval(u, settings, tabId ?? null)) return { ...base, state: 'ask' };
   return { ...base, state: scopeFor(u.href, settings, tabId ?? null) ? 'scan' : 'off' };
@@ -1740,6 +1785,31 @@ async function scanPastedText({ host, text, label }) {
   return { ok: true };
 }
 
+// ── triage: what the user has already looked at, per host, keyed like the findings (or the popup's
+//    derived rows: "param|…", "domain|…"). Kept apart from the findings so rescans and redeploys keep it.
+
+const TRIAGE = new Set(['reviewed', 'reported', 'fp']);
+const MAX_TRIAGE_KEYS = 20000;
+
+async function setTriage({ host, keys, status }) {
+  await ready();
+  if (!host || !Array.isArray(keys) || !keys.length) return { ok: false, error: 'Nothing to mark' };
+  if (status != null && !TRIAGE.has(status)) return { ok: false, error: 'Unknown status' };
+  const stored = hostCache.has(host) || !!(await chrome.storage.local.get(KEY(host)))[KEY(host)];
+  if (!stored) return { ok: false, error: 'Unknown host' };
+  const data = await getHost(host);
+  const t = (data.triage ||= {});
+  const at = Date.now();
+  for (const k of keys.slice(0, MAX_TRIAGE_KEYS)) {
+    if (typeof k !== 'string' || !k) continue;
+    if (status) t[k] = { s: status, at };
+    else delete t[k];
+  }
+  markDirty(host);
+  scheduleBadge(host);
+  return { ok: true, count: Math.min(keys.length, MAX_TRIAGE_KEYS) };
+}
+
 function status({ host }) {
   let q = 0;
   for (const h of pending.values()) if (!host || h === host) q++;
@@ -1759,6 +1829,7 @@ const HANDLERS = {
   approve,
   'scan-urls': scanUrls,
   'scan-text': scanPastedText,
+  triage: setTriage,
   status,
   clear: ({ host }) => clearData(host).then(() => ({ ok: true })),
 };

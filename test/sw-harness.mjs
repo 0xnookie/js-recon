@@ -621,5 +621,91 @@ check(d9.findings['endpoints|/api/v2/beta/feature-x']?.changedAt === ch?.at && d
 const chf = d9.findings['intel|main.1111aaaa.js → main.2222bbbb.js'];
 check(d9.changes.length === 1 && chf?.rule === 'bundle-changed' && chf.meta['files changed'] === 2, `one change and one Intel finding per deploy (${chf?.meta?.['files changed']} files, new: ${chf?.meta?.new})`);
 
+console.log('\nKnown-vulnerable libraries');
+{
+  FILES['https://app.acme.test/static/js/vendor.77aa.js'] = { body: '/*! For license information please see vendor.77aa.js.LICENSE.txt */\n!function(){var e="x";window.v=e}();' };
+  FILES['https://app.acme.test/static/js/vendor.77aa.js.LICENSE.txt'] = {
+    type: 'text/plain',
+    body: '/*!\n * jQuery JavaScript Library v3.4.1\n * https://jquery.com/\n */\n\n/**\n * @license AngularJS v1.5.8\n * (c) 2010-2016 Google, Inc. http://angularjs.org\n */\n\n/** @license React v16.13.1\n * react-dom.production.min.js\n */',
+  };
+  FILES['https://cdnjs.cloudflare.com/ajax/libs/lodash.js/4.17.15/lodash.min.js'] = { body: 'var _={};' };
+  FILES['https://app.acme.test/static/js/inline-ver.js'] = { body: '/*! @license DOMPurify 3.2.4 | (c) Cure53 and other contributors | Released under the Apache license 2.0 and Mozilla Public License 2.0 */var p=1;' };
+  const beforeLib = fetched.length;
+  fire('https://app.acme.test/static/js/vendor.77aa.js');
+  fire('https://cdnjs.cloudflare.com/ajax/libs/lodash.js/4.17.15/lodash.min.js');
+  fire('https://app.acme.test/static/js/inline-ver.js');
+  await drain();
+  const dl = mem['host:app.acme.test'];
+  const jq = dl.findings['deps|library:jquery 3.4.1'];
+  check(jq?.rule === 'vulnerable-library' && jq.severity === 'medium' && /CVE-2020-11022/.test(jq.meta.ids) && jq.meta['fixed in'] === '3.5.0', `jQuery 3.4.1 from the bundle's .LICENSE.txt: ${jq?.meta?.advisories} advisories, fixed in ${jq?.meta?.['fixed in']}`);
+  check(jq?.sources[0]?.file.endsWith('vendor.77aa.js.LICENSE.txt') && dl.files['https://app.acme.test/static/js/vendor.77aa.js.LICENSE.txt']?.kind === 'license', 'license file fetched once and listed in Files');
+  check(dl.findings['deps|library:angularjs 1.5.8']?.severity !== 'info' && dl.findings['deps|library:react-dom 16.13.1']?.rule === 'library-version', 'AngularJS 1.5.8 vulnerable, react-dom 16.13.1 listed without advisories');
+  const lo = dl.findings['deps|library:lodash 4.17.15'];
+  check(lo?.meta?.found === 'script URL' && lo.tags.includes('vulnerable'), 'lodash 4.17.15 recognised from its CDN URL');
+  check(dl.findings['deps|library:DOMPurify 3.2.4'] && fetched.slice(beforeLib).filter((u) => u.endsWith('.LICENSE.txt')).length === 1, 'version banner in the code recognised');
+  check(!fetched.some((u) => /registry\.npmjs\.org\/(?:jquery|lodash)(?:%20|\s)/.test(u)), 'library findings are never looked up on npm as package names');
+}
+
+console.log('\nTriage');
+{
+  await send({ type: 'scan-text', host: 'app.acme.test', text: `const k = "${fakeStripe}";` });
+  await drain();
+  const key = 'secrets|' + fakeStripe;
+  const before = mem.index['app.acme.test'];
+  check(mem['host:app.acme.test'].findings[key]?.severity === 'high' && before.high >= 1, `high-severity secret counted (high=${before.high})`);
+  const tr = await send({ type: 'triage', host: 'app.acme.test', keys: [key, 'domain|cdn.acme.test'], status: 'reported' });
+  await drain();
+  const after = mem.index['app.acme.test'];
+  const t = mem['host:app.acme.test'].triage || {};
+  check(tr?.ok && t[key]?.s === 'reported' && t['domain|cdn.acme.test']?.s === 'reported', 'status stored per host, for findings and derived rows');
+  check(after.high === before.high - 1 && badges[7] === String(after.critical + after.high + after.medium || ''), `triaged findings leave the badge and index counts (high ${before.high} → ${after.high})`);
+  await send({ type: 'rescan', host: 'app.acme.test' });
+  await drain();
+  check(mem['host:app.acme.test'].triage?.[key]?.s === 'reported', 'status survives a rescan');
+  await send({ type: 'triage', host: 'app.acme.test', keys: [key], status: null });
+  await drain();
+  check(!mem['host:app.acme.test'].triage?.[key] && mem.index['app.acme.test'].high === before.high, 'clearing the status counts it again');
+  const bad = await send({ type: 'triage', host: 'never-scanned.example', keys: [key], status: 'reviewed' });
+  const bad2 = await send({ type: 'triage', host: 'app.acme.test', keys: [key], status: 'pwned' });
+  check(!bad.ok && !bad2.ok && !mem['host:never-scanned.example'], 'unknown host or status refused, nothing created');
+}
+
+console.log('\nProgram scope');
+{
+  await chrome.storage.local.set({ settings: { ...mem.settings, scopeIn: ['*.acme.test', 'https://partner.example/portal'], scopeOut: ['blog.acme.test', 'https://app.acme.test/api/legacy'] } });
+  await sleep(20);
+  FILES['https://jenkins.acme.test/'] = { status: 403, type: 'text/html', body: '<title>Dashboard [Jenkins]</title>' };
+  const before = fetched.length;
+  const hp = await send({ type: 'probe-hosts', host: 'app.acme.test', hosts: ['jenkins.acme.test', 'blog.acme.test'] });
+  await drain();
+  const sent = fetched.slice(before);
+  check(hp?.ok && hp.queued === 1 && hp.skipped.scope === 1 && !sent.some((u) => /blog\.acme\.test/.test(u)), `live check: out-of-scope host skipped, never contacted (${JSON.stringify(hp?.skipped)})`);
+  check(sent.some((u) => /^https:\/\/jsr-[0-9a-f]{12}\.acme\.test\/$/.test(u)), 'wildcard probe still sent: *.acme.test covers it');
+
+  FILES['https://app.acme.test/api/v2/items'] = { body: '[]' };
+  FILES['https://app.acme.test/api/legacy/items'] = { body: '[]' };
+  const pb = await send({ type: 'probe', host: 'app.acme.test', urls: ['https://app.acme.test/api/v2/items', 'https://app.acme.test/api/legacy/items'] });
+  check(pb?.ok && pb.queued === 1 && pb.skipped.scope === 1, `endpoint check: path excluded by the scope skipped (${JSON.stringify(pb?.skipped)})`);
+  const rp = await send({ type: 'replay', host: 'app.acme.test', urls: ['https://app.acme.test/api/legacy/items'] });
+  check(rp?.ok && rp.queued === 0 && rp.skipped.scope === 1, 'send to proxy: out-of-scope URL skipped');
+  await drain();
+
+  // "ask" mode: a scope can stand in for the per-site OK
+  await chrome.storage.local.set({ settings: { ...mem.settings, scopeMode: 'ask', scopeAutoScan: false } });
+  await sleep(20);
+  const asked = await send({ type: 'scope' }, { tab: { id: 31, url: 'https://shop.acme.test/' } });
+  check(asked.state === 'ask' && asked.program === 'in', 'in-scope site still asks by default, and the prompt knows it is in scope');
+  await chrome.storage.local.set({ settings: { ...mem.settings, scopeAutoScan: true } });
+  await sleep(20);
+  const auto = await send({ type: 'scope' }, { tab: { id: 31, url: 'https://shop.acme.test/' } });
+  const outside = await send({ type: 'scope' }, { tab: { id: 32, url: 'https://blog.acme.test/' } });
+  check(auto.state === 'scan' && outside.state === 'ask' && outside.program === 'out', '"scan in-scope sites without asking": in-scope scans, out-of-scope still asks');
+  await chrome.storage.local.set({ settings: { ...mem.settings, scopeMode: 'all', scopeAutoScan: false, scopeIn: [], scopeOut: [] } });
+  await sleep(20);
+  const free = await send({ type: 'probe-hosts', host: 'app.acme.test', hosts: ['blog.acme.test'] });
+  check(free?.queued === 1 && !free.skipped.scope, 'no scope set: same-site hosts allowed as before');
+  await drain();
+}
+
 console.log(failures ? `\n${failures} check(s) failed` : '\nAll checks passed');
 process.exit(failures ? 1 : 0);
