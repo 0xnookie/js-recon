@@ -17,6 +17,7 @@ import { routeInfo } from './routes.js';
 import { taintAt } from './taint.js';
 import { enrichAwsKey, enrichGcpServiceAccount, enrichFirebaseKey } from './enrich.js';
 import { FLAG_RULES, objectFlags } from './flags.js';
+import { makePasswordRules } from './passwords.js';
 import {
   urlExprAt, bodyAt, objectKeyAt, keyBody, keyString, nextArg, assignmentBefore, skipWs, skipBalanced, isIdName, pathHasId, samplePayload,
 } from './request.js';
@@ -1082,6 +1083,8 @@ export const RULES = [
     { group: 1, generic: true, post: (v) => isLikelySecret(v) }),
   rule('basic-auth-header', 'Hardcoded Basic Auth', S, 'high', /["'`]Basic\s+([A-Za-z0-9+/]{8,}={0,2})["'`]/g,
     { group: 1, generic: true, post: basicAuth }),
+  // passwords the generic rule can't judge on entropy alone (pairs, checks, short keys, variables)
+  ...makePasswordRules({ isLikelySecret, notPlaceholder, RESERVED_WORDS }),
   rule('generic-secret', 'Hardcoded secret', S, 'medium',
     /\b([A-Za-z0-9_-]{0,30}?(?:api[_-]?key|api[_-]?secret|app[_-]?secret|app[_-]?key|client[_-]?secret|secret[_-]?key|access[_-]?key(?:[_-]?id)?|access[_-]?token|auth[_-]?token|refresh[_-]?token|private[_-]?key|consumer[_-]?(?:key|secret)|master[_-]?key|encryption[_-]?key|signing[_-]?key|passw(?:or)?d|pwd|secret|token))["'`]?\s*[:=]{1,3}\s*["'`]([^"'`\s]{8,256})["'`]/gi,
     {

@@ -142,7 +142,8 @@ export function analyze(code, rules, opts = {}) {
         if (category === 'secrets') {
           const { entropy, confidence } = secretConfidence(value, rule.generic);
           finding.entropy = Math.round(entropy * 100) / 100;
-          finding.confidence = confidence;
+          // a rule that knows better (a username next to a short password) sets the confidence itself
+          finding.confidence = extra?.confidence || confidence;
           // Offline triage: flag values that look like demo / example credentials (never dropped,
           // only tagged, so the user can deprioritise them without losing the hit).
           const signals = exampleSignals(value);

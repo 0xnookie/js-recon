@@ -5,6 +5,45 @@ All notable changes to **JS Recon** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.0] — 2026-11-15
+
+### Added
+- **More passwords.** A new rule (`src/passwords.js`) reports what the entropy-based `key = "value"`
+  rule can't judge:
+  - **credential pairs**: a username next to a password in the same object or call
+    (`{ username: "admin", password: "admin123" }`, `auth: { user: "svc", pass: "…" }`), short
+    passwords included, reported as *Hardcoded credentials* (high);
+  - **client-side checks**: `if (pass === "letmein")`, `pw.value === "…"` (high);
+  - **short keys**: `pass`, `pw`, `passphrase`, `passcode` and names ending in them (`DB_PASS`,
+    `smtpPw`);
+  - values **behind a variable** (`const p = "…"; login({ password: p })`) or **`atob("…")`**;
+  - **`btoa("user:pass")`** Basic-auth credentials and **password inputs with a value** (HTML and
+    JSX `type: "password", defaultValue: "…"`).
+  Labels, i18n keys, autocomplete values, action types, placeholders and comparisons with variables
+  are skipped; a username across a statement boundary doesn't make a pair.
+- **Notes on findings.** The status bar of an expanded row has a note field ("reported as H1
+  #123456"): kept per host with the status (and independently of it), shown on the row, found by
+  the filter box, added to the text / Markdown reports. In the program view, notes from every host
+  are shown together and a new note is written to all of them.
+- **Live check and crt.sh across all in-scope hosts.** In the *All in-scope hosts* view, *Check
+  live* and *Find more (crt.sh)* run for every in-scope registrable site at once (one batch per
+  site, through a scanned host of that site); wildcard DNS is judged per site.
+- **Command line.** `js-recon` (Node 20+, `npm install -g github:0xnookie/js-recon` or
+  `node cli/js-recon.mjs`) runs the extension's engine on pages, script / map URLs, URL lists
+  (`-l file`, `-l -` for stdin) or local files and directories: inline and external scripts,
+  source maps, lazy chunks, `.LICENSE.txt` files. Text, `--json` and `--sarif` output, `--only`,
+  `--min-severity`, `--fail-on` for CI, `-H` for cookies / tokens, `--scope` (any format the
+  Settings page imports; excluded hosts are never requested), `--first-party`, `--no-maps`,
+  `--no-chunks`.
+- **Firefox build.** `tools/build-firefox.mjs` writes `dist/firefox/` (and a ZIP) with a Firefox
+  manifest — background as an event-page module, gecko id, `options_ui`, Firefox 128+. Every release
+  now ships `js-recon-firefox-<version>.zip` next to the Chrome ZIP. Verified in Firefox 160: scanning,
+  observed requests, source maps, `.LICENSE.txt`, the dashboard.
+
+### Fixed
+- The request / response header listeners asked for Chrome's `extraHeaders` option unconditionally;
+  browsers without it (Firefox) rejected the listener. They now retry without it.
+
 ## [1.12.0] — 2026-11-15
 
 ### Added

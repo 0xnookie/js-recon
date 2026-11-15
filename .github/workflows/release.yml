@@ -33,7 +33,12 @@ jobs:
         run: |
           TAG="${GITHUB_REF_NAME#v}"
           MANIFEST="$(node -p "require('./manifest.json').version")"
-          echo "tag=$TAG manifest=$MANIFEST"
+          PKG="$(node -p "require('./package.json').version")"
+          echo "tag=$TAG manifest=$MANIFEST package=$PKG"
+          if [ "$PKG" != "$MANIFEST" ]; then
+            echo "::error::package.json version $PKG does not match manifest version $MANIFEST"
+            exit 1
+          fi
           if [ "$TAG" != "$MANIFEST" ]; then
             echo "::error::tag v$TAG does not match manifest version $MANIFEST"
             exit 1
@@ -49,10 +54,19 @@ jobs:
           echo "ZIP=$ZIP" >> "$GITHUB_ENV"
           unzip -l "$ZIP"
 
+      # same code, Firefox manifest (background.scripts, gecko id, options_ui): see tools/build-firefox.mjs
+      - name: Package Firefox build
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          FFZIP="js-recon-firefox-${VERSION}.zip"
+          node tools/build-firefox.mjs --zip "$FFZIP"
+          echo "FFZIP=$FFZIP" >> "$GITHUB_ENV"
+          unzip -l "$FFZIP"
+
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" "$ZIP" \
+          gh release create "$GITHUB_REF_NAME" "$ZIP" "$FFZIP" \
             --title "JS Recon $GITHUB_REF_NAME" \
             --generate-notes

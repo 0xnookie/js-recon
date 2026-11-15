@@ -11,3 +11,6 @@ desktop.ini
 *.pem
 *.log
 node_modules/
+
+# Firefox build output (node tools/build-firefox.mjs)
+dist/

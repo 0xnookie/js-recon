@@ -1,0 +1,27 @@
+{
+  "name": "js-recon",
+  "version": "1.13.0",
+  "description": "JavaScript recon for bug bounty and pentests: endpoints, secrets, source maps, feature flags and vulnerable libraries — browser extension and command line.",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "js-recon": "cli/js-recon.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node test/run-tests.mjs && node test/sw-harness.mjs",
+    "build:firefox": "node tools/build-firefox.mjs --zip dist/js-recon-firefox.zip",
+    "update:vulndb": "node tools/update-vulndb.mjs"
+  },
+  "files": [
+    "cli",
+    "src",
+    "manifest.json",
+    "LICENSE",
+    "README.md"
+  ],
+  "repository": "github:0xnookie/js-recon",
+  "license": "MIT"
+}

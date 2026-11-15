@@ -4,7 +4,7 @@
 // hosts (and which of their keys) it came from, so triage can be written back to every one of them.
 // Pure: no chrome.* APIs, so it can be unit-tested with Node.
 
-import { SEV_RANK } from '../src/util.js';
+import { SEV_RANK, siteOf } from '../src/util.js';
 
 export const PROGRAM = '@program';
 const MAX_SOURCES = 8;
@@ -53,12 +53,14 @@ export function mergeHosts(list) {
     files: {},
     findings: {},
     hostChecks: {},
+    wildcards: {}, // registrable site → its latest wildcard-DNS check
     probes: {},
     chunkUrls: {},
     triage: {},
     changes: [],
   };
   const statuses = new Map(); // merged key → Set of statuses ('' = untriaged) across its hosts
+  const notes = new Map(); // merged key → Set of the notes its hosts carry
   for (const { host, data } of list) {
     if (!data) continue;
     out.hosts.push(host);
@@ -70,6 +72,11 @@ export function mergeHosts(list) {
       const prev = out.hostChecks[h];
       if (!prev || (c.at || 0) > (prev.at || 0)) out.hostChecks[h] = c;
     }
+    if (data.hostWildcard) {
+      const site = siteOf(host.replace(/:\d+$/, ''));
+      const prev = out.wildcards[site];
+      if (!prev || (data.hostWildcard.at || 0) > (prev.at || 0)) out.wildcards[site] = data.hostWildcard;
+    }
     const t = data.triage || {};
     // derived rows (params, domains) carry the popup's own keys: newest answer wins
     for (const [k, v] of Object.entries(t)) {
@@ -79,6 +86,10 @@ export function mergeHosts(list) {
     for (const raw of Object.values(data.findings || {})) {
       const f = absolutized(raw, data.origin || 'https://' + host);
       const st = t[raw.key]?.s || '';
+      if (t[raw.key]?.n) {
+        if (!notes.has(f.key)) notes.set(f.key, new Set());
+        notes.get(f.key).add(t[raw.key].n);
+      }
       let m = out.findings[f.key];
       if (!m) {
         m = out.findings[f.key] = { ...f, tags: [...(f.tags || [])], sources: [...(f.sources || [])].slice(0, MAX_SOURCES), hosts: [host], origKeys: [[host, raw.key]] };
@@ -103,8 +114,30 @@ export function mergeHosts(list) {
       if (s) out.triage[k] = { s, at: 0 };
     }
   }
+  // notes from every host, joined
+  for (const [k, set] of notes) out.triage[k] = { ...(out.triage[k] || {}), n: [...set].join(' | ') };
   out.hosts.sort();
   return out;
+}
+
+/**
+ * Program-wide subdomain checks: the subdomains grouped by registrable site, each sent through one
+ * scanned host of that site (the worker files the results under it). [{ host, site, hosts }]
+ */
+export function siteGroups(subdomains, scannedHosts) {
+  const home = new Map();
+  for (const h of [...scannedHosts].sort()) {
+    const site = siteOf(h.replace(/:\d+$/, ''));
+    if (!home.has(site)) home.set(site, h);
+  }
+  const groups = new Map();
+  for (const d of subdomains) {
+    const site = siteOf(String(d).replace(/:\d+$/, ''));
+    if (!home.has(site)) continue;
+    if (!groups.has(site)) groups.set(site, { host: home.get(site), site, hosts: [] });
+    groups.get(site).hosts.push(d);
+  }
+  return [...groups.values()];
 }
 
 /** Host → keys to write when the user triages merged items (derived rows go to every host). */

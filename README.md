@@ -16,13 +16,13 @@ JS Recon
 [![Security](https://img.shields.io/badge/Security-Recon-red)]()
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Browser](https://img.shields.io/badge/Chrome%20%7C%20Edge-Manifest%20V3-black?logo=googlechrome&logoColor=white)]()
-[![Rules](https://img.shields.io/badge/Rules-175-brightgreen)]()
+[![Rules](https://img.shields.io/badge/Rules-178-brightgreen)]()
 [![Secret rules](https://img.shields.io/badge/Secret%20rules-68-red)]()
 [![Cloud](https://img.shields.io/badge/Cloud%20providers-14-informational)]()
 [![Bundlers](https://img.shields.io/badge/Lazy%20chunks-webpack%20%7C%20Next.js%20%7C%20Vite%20%7C%20ESM-8A2BE2)]()
 [![Dependencies](https://img.shields.io/badge/Runtime%20deps-0-brightgreen)]()
 [![Build](https://img.shields.io/badge/Build%20step-none-lightgrey)]()
-[![Version](https://img.shields.io/badge/Version-1.12.0-orange)]()
+[![Version](https://img.shields.io/badge/Version-1.13.0-orange)]()
 [![PRs](https://img.shields.io/badge/PRs-welcome-brightgreen)]()
 
 </div>
@@ -46,6 +46,7 @@ Modern web apps ship their attack surface to the browser: API routes, feature fl
 - **Hands it to your proxy.** OpenAPI and Postman exports for Burp, Caido, ZAP and Postman, a GraphQL schema sketch, wordlists, and an opt-in "send GET URLs to proxy" that fills the site map.
 - **Signal over noise.** Entropy-based confidence on secrets, *interesting* tags on admin / debug / redirect-style names, library noise tagged and hideable.
 - **Private.** Findings are stored in `chrome.storage` on your machine and never sent anywhere.
+- **Chrome, Edge, Firefox and the command line.** The same engine runs as a browser extension and as `js-recon` in a terminal, for scripted pipelines and CI.
 
 ---
 
@@ -53,7 +54,7 @@ Modern web apps ship their attack surface to the browser: API routes, feature fl
 
 | Tab | What you get |
 |---|---|
-| **Secrets** | 79 secret rules: provider-specific keys (AWS, GCP, Azure, GitHub, GitLab, Slack, Stripe, OpenAI, Anthropic, OpenRouter, Perplexity, Twilio, SendGrid, Tailscale, PlanetScale, Databricks, Terraform Cloud, Figma, Sentry, server-side LaunchDarkly / Statsig / Flagsmith keys …), private keys, JWTs (decoded), DB connection strings, credentials in URLs, hard-coded Bearer / Basic auth and a context-based `key = "value"` rule. Each secret gets a **Shannon-entropy confidence**: `certain` / `firm` / `tentative`. **Offline enrichment, no network:** an AWS access key is decoded to its **owning account number** and key type (long-term vs temporary STS), a GCP service-account JSON and Firebase config reveal their **project**, JWTs are tagged *expired* / *expires-soon* from their `exp` claim, and demo / placeholder values are tagged *example*. One **Hide low-value** toggle drops the *example* and *tentative* noise. |
+| **Secrets** | 82 secret rules: provider-specific keys (AWS, GCP, Azure, GitHub, GitLab, Slack, Stripe, OpenAI, Anthropic, OpenRouter, Perplexity, Twilio, SendGrid, Tailscale, PlanetScale, Databricks, Terraform Cloud, Figma, Sentry, server-side LaunchDarkly / Statsig / Flagsmith keys …), private keys, JWTs (decoded), DB connection strings, credentials in URLs, hard-coded Bearer / Basic auth and a context-based `key = "value"` rule. **Passwords** beyond that rule: a username next to a short password (`{ username: "admin", password: "admin123" }`, `auth: { user, pass }`) is reported as **credentials**, client-side checks (`if (pass.value === "letmein")`), short keys (`pass`, `pw`, `passphrase`, `DB_PASS`), values behind a variable (`const p = "…"; login({ password: p })`) or `atob("…")`, `btoa("user:pass")` Basic auth and password inputs shipped with a value. Labels, i18n keys, autocomplete values and placeholders are skipped. Each secret gets a **Shannon-entropy confidence**: `certain` / `firm` / `tentative`. **Offline enrichment, no network:** an AWS access key is decoded to its **owning account number** and key type (long-term vs temporary STS), a GCP service-account JSON and Firebase config reveal their **project**, JWTs are tagged *expired* / *expires-soon* from their `exp` claim, and demo / placeholder values are tagged *example*. One **Hide low-value** toggle drops the *example* and *tentative* noise. |
 | **API** | Endpoints **with their HTTP method**, coloured like Swagger UI: `axios.post()`, `http.get<T>()`, `fetch(url, { method })`, `new Request`, `xhr.open("PUT", …)`, `$.ajax({ type, url })`, `axios({ method, url })`, wrapper functions, `` `${base}/path` `` and `BASE + "/path"`, also when the **URL is held in a variable** (`let url = "action.php"; xhr.open("POST", url)`) and for bare server scripts (`action.php`, `Save.aspx`, `login.do`). **Request bodies are read from the code**: `JSON.stringify({…})`, object literals, `FormData.append()`, `URLSearchParams`, `"a=1&b=" + x` strings, `xhr.send(data)`, `fetch(…, { body })`, `axios.post(url, data)`, `$.post` / `$.ajax({ data })`, `ky({ json })` (and variables holding them), so a row reads `POST action.php { id }` and *curl* sends the real payload (`--data-raw '{"id":1}'`, form-encoded or multipart as the page does). axios `params` and `$.get` data become query parameters. Rows that send an object ID (`id`, `userId`, `order_id`, `/users/{id}`, `"/tokens/" + id`) are tagged ***idor***, and the tab is **sorted by what to test first**: sensitive names, IDOR candidates, state-changing methods, known inputs. Plus the calls the page **really makes**, tagged *observed*, with IDs normalised (`/users/{id}`). **GraphQL operations** (`gql` templates, Apollo / Relay documents) appear as QUERY / MUTATION / SUBSCRIPTION rows with their variables, root fields and full document. Every row has *curl* and *Copy*. |
 | **Endpoints / URLs** | LinkFinder-style extraction with template literals, scheme-less `host.tld/path` strings and Next.js routes. Tagged *interesting* (admin, debug, upload, token, graphql …), *static* or *noise*. |
 | **Routes** | The app's own **client-side pages** parsed out of the router config — React Router (`<Route path>`, `createBrowserRouter`), Vue Router and Angular (`loadChildren`, `canActivate`), plus any plain `{ path, component/element }` table. Includes pages that are never linked in the UI (`/admin`, `/internal`, debug consoles). Routes behind an auth / role guard are tagged *guarded*; lazy-loaded modules and redirect targets are captured too. Exported to `routes.txt`. |
@@ -73,9 +74,9 @@ Modern web apps ship their attack surface to the browser: API routes, feature fl
 - **Send GET URLs to proxy** (active, two clicks): requests each concrete, harmless-looking same-site GET URL once, so it lands in the site map of the proxy your browser uses.
 - **Subdomain liveness and high-value targets** (Domains tab): *Find more (crt.sh)* adds every name from the certificate-transparency logs (sends the domain name to crt.sh, nothing to the target); *Check live* (active, two clicks) requests `/` of each subdomain over HTTPS, then HTTP, without cookies — max 500 hosts, same registrable domain only, deny-listed hosts never — and rates each one. Exported as `live-hosts.txt` and `high-value-hosts.txt` and at the top of the text / Markdown reports.
 - **Endpoint liveness** (active, two clicks): sends the same safe same-site GET requests and records the HTTP status next to each endpoint, API and route — telling live (200), **protected (401 / 403, worth testing)**, wrong-method (405), redirecting (3xx) and dead (404) apart. GET only, same site only, capped, never cross-site.
-- **Triage**: every row has a ✓ (*reviewed*) button, and its detail offers *Reviewed* / *Reported* / *False positive*. The **Status** filter shows everything, only what's left **to review** (tab counts follow), or one status; **Mark reviewed** marks every row shown (two clicks). Triaged secrets stop counting on the toolbar badge and in notifications; false positives are left out of the text / Markdown reports and SARIF. Kept per host, apart from the findings, so rescans and redeploys keep it.
+- **Triage**: every row has a ✓ (*reviewed*) button, and its detail offers *Reviewed* / *Reported* / *False positive* and a **note** ("reported as H1 #123456", shown on the row, searchable, in the reports). The **Status** filter shows everything, only what's left **to review** (tab counts follow), or one status; **Mark reviewed** marks every row shown (two clicks). Triaged secrets stop counting on the toolbar badge and in notifications; false positives are left out of the text / Markdown reports and SARIF. Kept per host, apart from the findings, so rescans and redeploys keep it.
 - **Program scope** (Settings → *Program scope*): paste the scope table of a HackerOne / Bugcrowd / Intigriti / YesWeHack program (the *In scope* / *Out of scope* headings are understood), HackerOne's scope CSV or Burp's project-options JSON. `*.acme.com` (every subdomain), `acme.com` (that host), `api-*.acme.com`, `app.acme.com:8443`, `https://acme.com/api` (paths count for URL checks) and IPv4 ranges; out of scope wins, unlisted counts as out. Once set, the subdomain live check, endpoint liveness, *Send GET URLs to proxy* and source-map guessing **only contact in-scope hosts and URLs**. A host that isn't in scope shows a chip next to the host menu (in scope: a green status dot), the Domains tab greys out-of-scope hosts and gets an **In scope** filter, the ask-first prompt says whether the site is in scope, and *Scan in-scope sites without asking* can stand in for the per-site OK.
-- **All in-scope hosts** (host menu, with a scope set): every scanned in-scope host merged into one view and one set of exports. Relative endpoints and API paths are made absolute per host so they stay apart; a secret found on several hosts is one row listing them all. Triage from here is written back to every host.
+- **All in-scope hosts** (host menu, with a scope set): every scanned in-scope host merged into one view and one set of exports. Relative endpoints and API paths are made absolute per host so they stay apart; a secret found on several hosts is one row listing them all. Triage from here is written back to every host. *Check live* and *Find more (crt.sh)* run across every in-scope site at once.
 - **Offline secret enrichment** (no network): AWS access keys are decoded to the **account number** that owns them — computed from the key ID locally, nothing is sent to AWS — alongside the key type; GCP service-account JSON and Firebase web config are tied to their **project**; and JWTs are flagged *expired* / *expires-soon* from their `exp` claim. Demo / example-looking values are tagged so they can be hidden. JS Recon never validates a discovered credential against its issuer; confirm a key yourself with the issuer's own tooling (e.g. `aws sts get-access-key-info`).
 - **Fresh advisory data**: every tagged release downloads the latest retire.js advisories before it runs the tests and packages the extension.
 - **Wordlists** per input kind (params, body fields, headers, cookies, storage keys, paths, path segments, URLs, subdomains, live hosts, high-value hosts), ready for ffuf, Arjun, x8, Param Miner, httpx and nuclei.
@@ -204,6 +205,19 @@ Tested against live apps: github.com (1,669 chunks from one runtime), nextjs.org
 
 No build step and no runtime dependencies. Chrome / Edge 116+; the styled drop-downs need 135+ and fall back to native ones before that.
 
+**Firefox 128+:** download `js-recon-firefox-<version>.zip` from the [releases](https://github.com/0xnookie/js-recon/releases) (or run `node tools/build-firefox.mjs`, which writes `dist/firefox/`), open `about:debugging#/runtime/this-firefox` → **Load Temporary Add-on…** and pick the ZIP or `dist/firefox/manifest.json`. Same code, a Firefox manifest. Release Firefox keeps an unsigned add-on until it restarts; Developer Edition / Nightly can keep it with `xpinstall.signatures.required` set to `false`.
+
+**Command line (Node 20+):**
+```bash
+npm install -g github:0xnookie/js-recon      # or run it from the clone: node cli/js-recon.mjs
+js-recon https://app.example.com/                       # a page: its scripts, source maps, lazy chunks
+js-recon -l urls.txt --json report.json --sarif out.sarif
+cat urls.txt | js-recon -l - --only secrets,flags --min-severity medium
+js-recon ./jsrecon-dump/ --host app.example.com         # local files, e.g. the extension's Dump ZIP
+js-recon https://app.example.com/ -H "Cookie: session=…" --scope scope.csv --fail-on high
+```
+The same analysis as the extension (rules, source maps, lazy chunks, libraries, flags, passwords) without the browser: what a page loads is fetched once, with your headers. `--scope` takes the program scope in any format the Settings page imports; excluded hosts are never requested. `--fail-on high` makes it a CI gate. `js-recon --help` lists every option.
+
 ---
 
 ## 🕹️ Usage
@@ -266,12 +280,13 @@ node test/run-tests.mjs        # rules, inputs, headers, lazy chunks, postMessag
                                # (AWS/GCP/Firebase + JWT expiry), provider-token rules, observed requests, GraphQL + schema,
                                # OpenAPI / Postman / SARIF, Wayback order, crt.sh parsing, takeover / product fingerprints,
                                # high-value rating, program-scope import + matching, library versions + advisories,
-                               # program-view merge, feature flags (SDK calls, bootstrap state, keys), ZIP, 6 MB perf checks
+                               # program-view merge, feature flags (SDK calls, bootstrap state, keys), passwords (pairs,
+                               # checks, variables, false-positive guards), notes, Firefox manifest, CLI engine, ZIP, 6 MB perf
 node test/sw-harness.mjs       # service worker end to end with mocked chrome.*, fetch, npm and archive.org: iframes, chunks,
                                # headers, observed traffic, runtime hooks, Wayback, crt.sh, subdomain live check + wildcard DNS,
                                # change alerts, send to proxy, endpoint liveness, dumper, vulnerable libraries + .LICENSE.txt,
                                # triage (badge, rescans), program scope on every active check, ask-first + scope,
-                               # feature flags merged across files
+                               # feature flags merged across files, notes
 node test/fp-sweep.mjs <dir>   # scan a directory of real JS and list secret hits (false-positive check)
 ```
 
@@ -297,6 +312,7 @@ src/hosts.js        subdomains: crt.sh parsing, live-check fingerprints (title, 
 src/scope.js        program scope: import (scope text, HackerOne CSV, Burp JSON) and host / URL matching
 src/libs.js         library versions (banners, version strings, URLs, .LICENSE.txt) → advisories
 src/flags.js        feature flags: SDK call sites, bootstrap / config states, provider attribution
+src/passwords.js    passwords the generic rule misses: credential pairs, client-side checks, variables, btoa
 src/vulndb.js       advisory data generated from retire.js (tools/update-vulndb.mjs), Apache-2.0, see vulndb-LICENSE.md
 src/runtime.js      opt-in hooks that run in the page's own world
 src/sourcemap.js    source-map parsing shared by worker and UI
@@ -306,6 +322,8 @@ ui/                 popup / dashboard / settings, dump.js (source reconstruction
                     program.js (all in-scope hosts merged into one view)
 icons/  fonts/      toolbar icons and logo; Inter and JetBrains Mono (SIL OFL)
 assets/             README banner and screenshots
+cli/                command line: js-recon.mjs (options, output), scan.mjs (fetch + analysis engine)
+tools/              update-vulndb.mjs (retire.js advisories), build-firefox.mjs (Firefox manifest + ZIP)
 test/               Node tests
 .github/workflows/  CI (tests + checks) and tagged-release packaging
 ```

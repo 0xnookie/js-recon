@@ -1017,6 +1017,95 @@ console.log('\nFeature flags');
   check(interestingFlag('enableNewCheckout') && interestingFlag('staffTools') && !interestingFlag('renewal') && !interestingFlag('newsletter') && !interestingFlag('dark-mode'), 'interesting flag names by whole words (enableNewCheckout yes, renewal no)');
 }
 
+console.log('\nPasswords: pairs, checks, short keys, variables');
+{
+  const sec = (code) => analyze(code, rules).filter((f) => f.category === 'secrets');
+  const one = (code) => sec(code)[0];
+  const pair = one('const cfg={auth:{username:"admin",password:"admin123"}};');
+  check(pair?.rule === 'password-context' && pair.severity === 'high' && pair.label === 'Hardcoded credentials' && pair.meta.username === 'admin' && pair.confidence === 'firm', 'username + short password → credentials (high, firm)');
+  check(one('e.login({user:"svc_report",pass:"Rep0rt!"})')?.meta?.username === 'svc_report', 'minified user / pass pair, underscore user name');
+  check(one('createTransport({host:"smtp.acme.com",auth:{user:"noreply@acme.com",pass:"Mailer2023"}})')?.meta?.username === 'noreply@acme.com', 'e-mail as user name (nodemailer style)');
+  const short = sec('var smtpPw="Zx9!kQ2#mL7p";var DB_PASS="pT4$wq9Lx2Rm";');
+  check(short.length === 2 && short.every((f) => f.rule === 'password-context' && f.severity === 'medium' && !f.meta.username), 'short keys (smtpPw, DB_PASS) alone: medium, and never paired across statements');
+  const cmp = one('if(e.target.pass.value==="letmein42"){unlock()}');
+  check(cmp?.label === 'Client-side password check' && cmp.severity === 'high' && cmp.value === 'letmein42', 'client-side check: pass.value === "…"');
+  check(one('var a=1,p="Spr1ng!2024";function l(){return login({username:u,password:p})}')?.meta?.via === 'variable p', 'value behind a variable is followed (tentative)');
+  check(one('const c={password:atob("U2VjcjN0UGFzcyE=")};')?.value === 'Secr3tPass!', 'atob("…") decoded');
+  const b = one('headers:{Authorization:"Basic "+btoa("api_user:s3cr3tP4ss")}');
+  check(b?.rule === 'basic-auth-btoa' && b.value === 'api_user:s3cr3tP4ss' && b.severity === 'high', 'btoa("user:pass") Basic auth');
+  check(one('<form><input name="pw" type="password" value="hunter2!"></form>')?.rule === 'password-field-value' && one('createElement("input",{type:"password",defaultValue:"Welcome1"})')?.value === 'Welcome1', 'prefilled password inputs (HTML and JSX)');
+  const negatives = [
+    'const t={username:"Username",password:"Password",pass:"Pass",pw:"pw"};',
+    'const m={user:"auth.user.label",password:"auth.password.label",passwordHint:"Use 8+ chars"};',
+    '{name:"email",autoComplete:"username"},{name:"password",autoComplete:"current-password",type:"password"}',
+    'if(password===""){err("required")}if(p.password===confirm)ok();e.password=t.password;',
+    'var bypass="abcDEF123xyz";compass="N12E44W";',
+    'case"SET_PASSWORD":return{...s,password:a.payload};passwordInput:"passwordInput"',
+    '{username:"your-username",password:"changeme"}',
+    '<input type="password" name="pw" value="">',
+    '{type:"password",value:n,onChange:r}',
+  ];
+  const fp = negatives.flatMap((c) => sec(c).map((f) => f.value));
+  check(!fp.length, `labels, i18n keys, autocomplete values, comparisons with variables, bypass / compass, action types, placeholders, empty and controlled inputs: no hits${fp.length ? ' — ' + fp.join(', ') : ''}`);
+}
+
+console.log('\nNotes, program-wide checks');
+{
+  const { mergeHosts, siteGroups } = await import('../ui/program.js');
+  const f = (v) => ({ key: 'secrets|' + v, category: 'secrets', value: v, label: 's', rule: 's', severity: 'high', tags: [], sources: [], hits: 1 });
+  const a = { host: 'app.acme.com', origin: 'https://app.acme.com', files: {}, findings: { 'secrets|K': f('K') }, triage: { 'secrets|K': { s: 'reported', at: 1, n: 'H1 #1234' } }, hostWildcard: { status: 200, name: 'jsr-1.acme.com', at: 5 } };
+  const b = { host: 'shop.acme.io', origin: 'https://shop.acme.io', files: {}, findings: { 'secrets|K': f('K') }, triage: { 'secrets|K': { s: 'reported', at: 1, n: 'dup of #1234' } } };
+  const m = mergeHosts([{ host: 'app.acme.com', data: a }, { host: 'shop.acme.io', data: b }]);
+  check(m.triage['secrets|K']?.s === 'reported' && m.triage['secrets|K'].n === 'H1 #1234 | dup of #1234', 'program view: status kept when hosts agree, notes from every host joined');
+  check(m.wildcards['acme.com']?.name === 'jsr-1.acme.com' && !m.wildcards['acme.io'], 'program view: wildcard-DNS result kept per registrable site');
+  const g = siteGroups(['jenkins.acme.com', 'api.acme.io', 'dev.acme.com', 'evil.example'], ['shop.acme.io', 'app.acme.com', 'www.acme.com']);
+  check(g.length === 2 && g.find((x) => x.site === 'acme.com')?.host === 'app.acme.com' && g.find((x) => x.site === 'acme.com').hosts.join() === 'jenkins.acme.com,dev.acme.com' && g.find((x) => x.site === 'acme.io')?.host === 'shop.acme.io', 'program-wide live check: one batch per site, through a scanned host of that site; other sites dropped');
+}
+
+console.log('\nFirefox build, package');
+{
+  const { firefoxManifest, GECKO_ID } = await import('../tools/build-firefox.mjs');
+  const { readFileSync } = await import('node:fs');
+  const manifest = JSON.parse(readFileSync(new URL('../manifest.json', import.meta.url), 'utf8'));
+  const ff = firefoxManifest(manifest);
+  check(ff.background.scripts?.[0] === manifest.background.service_worker && !ff.background.service_worker && ff.background.type === 'module', 'background as an event-page module (Firefox has no MV3 service worker)');
+  check(ff.browser_specific_settings?.gecko?.id === GECKO_ID && ff.browser_specific_settings.gecko.strict_min_version === '128.0' && !ff.minimum_chrome_version && ff.options_ui?.page === manifest.options_page && !ff.options_page, 'gecko id, minimum Firefox 128, options_ui, no Chrome-only keys');
+  check(manifest.background.service_worker && !manifest.browser_specific_settings, 'the Chrome manifest itself is unchanged');
+  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+  check(pkg.version === manifest.version && pkg.bin?.['js-recon'] === 'cli/js-recon.mjs', `package.json ${pkg.version} matches manifest ${manifest.version}, CLI bin`);
+}
+
+console.log('\nCommand line (engine with a mocked fetch)');
+{
+  const { scan, collect, pageScripts } = await import('../cli/scan.mjs');
+  const MAP = JSON.stringify({ version: 3, sources: ['webpack://app/./src/api.ts', 'webpack://app/./node_modules/jquery/dist/jquery.js'], sourcesContent: ['fetch("/api/v1/session",{method:"POST",body:JSON.stringify({username:"svc_backup",password:"Backup#1"})});', '/*!\n * jQuery JavaScript Library v3.4.1\n */'] });
+  const SITE = {
+    'https://t.acme.test/': ['text/html', '<!doctype html><script>window.CFG={features:{newBilling:false}};</script><script src="/static/main.js"></script><script src="https://www.google-analytics.com/analytics.js"></script><script src="https://blocked.acme.test/x.js"></script>'],
+    'https://t.acme.test/static/main.js': ['application/javascript', '/*! For license information please see main.js.LICENSE.txt */\nconst c=ld.variation("beta-export",!1);fetch("/api/v2/users/"+id);\n//# sourceMappingURL=main.js.map'],
+    'https://t.acme.test/static/main.js.map': ['application/json', MAP],
+    'https://t.acme.test/static/main.js.LICENSE.txt': ['text/plain', '/** @license React v16.13.1\n * react-dom.production.min.js */'],
+  };
+  const asked = [];
+  const fakeFetch = async (url) => {
+    asked.push(url);
+    const r = SITE[url];
+    return r ? new Response(r[1], { status: 200, headers: { 'content-type': r[0] } }) : new Response('nope', { status: 404 });
+  };
+  const ps = pageScripts(SITE['https://t.acme.test/'][1], 'https://t.acme.test/');
+  check(ps.inline.length === 1 && ps.urls.length === 3 && ps.urls[0] === 'https://t.acme.test/static/main.js', 'page: inline scripts and script URLs resolved');
+  const res = await scan({ targets: ['https://t.acme.test/'], fetchImpl: fakeFetch, options: { ignoreUrl: (u) => u.includes('blocked.') } });
+  const all = collect(res);
+  const v = (x) => all.find((f) => f.value === x);
+  check(v('Backup#1')?.label === 'Hardcoded credentials' && v('Backup#1').sources[0].sub === 'src/api.ts', 'credentials found in a source-map original source');
+  check(v('jquery 3.4.1')?.rule === 'vulnerable-library' && v('react-dom 16.13.1') && v('beta-export')?.meta.default === 'false' && v('newBilling')?.meta.state === 'false', 'library from node_modules in the map and from .LICENSE.txt; flags from the bundle and the inline script');
+  check(v('GET /api/v2/users/') && v('POST /api/v1/session'), 'API calls from the bundle and the map');
+  check(!asked.some((u) => /google-analytics|blocked\./.test(u)), 'ignored script hosts and scope-excluded URLs are never requested');
+  check(collect(res, { minSeverity: 'high' }).every((f) => f.severity === 'high' || f.severity === 'critical') && collect(res, { only: ['flags'] }).every((f) => f.category === 'flags'), '--min-severity / --only filters');
+  const local = await scan({ texts: [{ id: 'bundle.js', text: 'var DB_PASS="pT4$wq9Lx2Rm";' }, { id: 'app.js.map', text: MAP, map: true }], host: 'local.test', fetchImpl: () => { throw new Error('no network for local files'); } });
+  const lf = collect(local);
+  check(lf.some((f) => f.value === 'pT4$wq9Lx2Rm') && lf.some((f) => f.value === 'jquery 3.4.1') && Object.keys(local.hosts).join() === 'local.test', 'local files and .map files, without network');
+}
+
 console.log('\nProgram view: merging in-scope hosts');
 {
   const { mergeHosts, triageTargets, PROGRAM } = await import('../ui/program.js');

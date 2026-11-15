@@ -25,7 +25,7 @@ jobs:
       - name: Syntax-check all sources
         run: |
           set -e
-          for f in src/*.js ui/*.js; do node --check "$f"; done
+          for f in src/*.js ui/*.js cli/*.mjs tools/*.mjs; do node --check "$f"; done
 
       - name: Validate manifest.json
         run: node -e "const m=require('./manifest.json'); if(m.manifest_version!==3) throw new Error('manifest_version must be 3'); if(!/^\d+\.\d+\.\d+$/.test(m.version)) throw new Error('bad version '+m.version); console.log('manifest OK v'+m.version)"

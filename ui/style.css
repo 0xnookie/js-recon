@@ -2173,3 +2173,27 @@ a.mini-link:hover {
 .row .src.flag-state {
   color: var(--text-2);
 }
+
+/* ── notes on rows ── */
+.triage-bar .note-input {
+  flex: 1 1 260px;
+  min-width: 180px;
+  height: 24px;
+  font-size: 12px;
+}
+.row .row-note {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 260px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 11.5px;
+  font-style: italic;
+  color: var(--text-2);
+}
+.row .row-note::before {
+  content: '✎ ';
+  font-style: normal;
+  color: var(--muted);
+}

@@ -168,7 +168,7 @@ function summarize(data) {
   const triage = data.triage || {};
   for (const f of Object.values(data.findings)) {
     counts[f.category] = (counts[f.category] || 0) + 1;
-    if (triage[f.key]) continue; // reviewed / reported / false positive: no longer counts on the badge
+    if (triage[f.key]?.s) continue; // reviewed / reported / false positive: no longer counts on the badge
     if (f.severity === 'critical') critical++;
     else if (f.category === 'secrets') {
       if (f.severity === 'high') high++;
@@ -255,7 +255,7 @@ function mergeFindings(data, results, src) {
       if (r.meta) f.meta = { ...r.meta };
       if (r.desc) f.desc = r.desc;
       if (r.confidence) Object.assign(f, { confidence: r.confidence, entropy: r.entropy });
-      if ((r.severity === 'high' || r.severity === 'critical') && !data.triage?.[key]) alerts.push(f);
+      if ((r.severity === 'high' || r.severity === 'critical') && !data.triage?.[key]?.s) alerts.push(f);
       src.newKeys?.push(key);
     } else if ((SEV_RANK[r.severity] || 0) > (SEV_RANK[f.severity] || 0)) {
       f.severity = r.severity;
@@ -1513,7 +1513,21 @@ async function onRequestSent(d) {
   markDirty(scope.host);
 }
 
-chrome.webRequest.onBeforeSendHeaders?.addListener(
+/**
+ * addListener with Chrome's "extraHeaders" (needed there for Cookie / Referer / CORS headers); Firefox
+ * has no such option and rejects the whole call, so it is retried without it.
+ */
+function listenWithHeaders(event, fn, filter, spec) {
+  if (!event) return;
+  try {
+    event.addListener(fn, filter, spec);
+  } catch {
+    event.addListener(fn, filter, spec.filter((x) => x !== 'extraHeaders'));
+  }
+}
+
+listenWithHeaders(
+  chrome.webRequest.onBeforeSendHeaders,
   (d) => void onRequestSent(d).catch(() => {}),
   { urls: ['http://*/*', 'https://*/*', 'ws://*/*', 'wss://*/*'], types: [...OBSERVED_TYPES] },
   ['requestHeaders', 'extraHeaders'],
@@ -1611,7 +1625,8 @@ async function onRuntimeCollect(msg, sender) {
   return { ok: true, findings: out.length };
 }
 
-chrome.webRequest.onCompleted.addListener(
+listenWithHeaders(
+  chrome.webRequest.onCompleted,
   (d) => void onResponseHeaders(d).catch(() => {}),
   { urls: ['http://*/*', 'https://*/*'], types: [...HEADER_TYPES] },
   ['responseHeaders', 'extraHeaders'],
@@ -1793,10 +1808,18 @@ async function scanPastedText({ host, text, label }) {
 const TRIAGE = new Set(['reviewed', 'reported', 'fp']);
 const MAX_TRIAGE_KEYS = 20000;
 
-async function setTriage({ host, keys, status }) {
+const MAX_NOTE = 500;
+
+/** { host, keys, status? (null clears), note? ('' clears) }: status and note are set independently. */
+async function setTriage(msg) {
+  const { host, keys, status, note } = msg;
   await ready();
   if (!host || !Array.isArray(keys) || !keys.length) return { ok: false, error: 'Nothing to mark' };
-  if (status != null && !TRIAGE.has(status)) return { ok: false, error: 'Unknown status' };
+  const hasStatus = 'status' in msg;
+  const hasNote = typeof note === 'string';
+  if (!hasStatus && !hasNote) return { ok: false, error: 'Nothing to set' };
+  if (hasStatus && status != null && !TRIAGE.has(status)) return { ok: false, error: 'Unknown status' };
+  const text = hasNote ? note.replace(/\s+/g, ' ').trim().slice(0, MAX_NOTE) : '';
   const stored = hostCache.has(host) || !!(await chrome.storage.local.get(KEY(host)))[KEY(host)];
   if (!stored) return { ok: false, error: 'Unknown host' };
   const data = await getHost(host);
@@ -1804,7 +1827,16 @@ async function setTriage({ host, keys, status }) {
   const at = Date.now();
   for (const k of keys.slice(0, MAX_TRIAGE_KEYS)) {
     if (typeof k !== 'string' || !k) continue;
-    if (status) t[k] = { s: status, at };
+    const e = { ...(t[k] || {}) };
+    if (hasStatus) {
+      if (status) Object.assign(e, { s: status, at });
+      else delete e.s;
+    }
+    if (hasNote) {
+      if (text) Object.assign(e, { n: text, nat: at });
+      else delete e.n, delete e.nat;
+    }
+    if (e.s || e.n) t[k] = e;
     else delete t[k];
   }
   markDirty(host);

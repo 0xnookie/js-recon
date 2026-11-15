@@ -9,7 +9,7 @@ import { parseDefinition, schemaSketch } from '../src/graphql.js';
 import { rateHost, hostAlive } from '../src/hosts.js';
 import { compileScope, hasScope, hostScope, urlScope } from '../src/scope.js';
 import { VULNDB_DATE } from '../src/libs.js';
-import { PROGRAM, mergeHosts, triageTargets } from './program.js';
+import { PROGRAM, mergeHosts, triageTargets, siteGroups } from './program.js';
 
 const params = new URLSearchParams(location.search);
 const FULL = params.get('view') === 'full';
@@ -261,7 +261,11 @@ function buildModel(data) {
   );
   // the target's own subdomains: what answered (our check or the page's traffic) and how worth testing they are
   const checks = data.hostChecks || {};
-  const wild = data.hostWildcard?.status ? data.hostWildcard : null;
+  // wildcard DNS is per registrable site: the host's own check, or each site's in the program view
+  const wildFor = (site) => {
+    const w = data.program ? data.wildcards?.[site] : data.hostWildcard;
+    return w?.status ? w : null;
+  };
   for (const d of domains.values()) {
     if (!d.tags.includes('same-site') || d.value.includes('*')) continue;
     d.check = checks[d.value.toLowerCase()] || null;
@@ -270,7 +274,8 @@ function buildModel(data) {
       const { pending, ...rest } = d.check;
       d.check = rest.seen ? rest : null;
     }
-    d.rating = rateHost(d.value, siteOf(d.value.replace(/:\d+$/, '')), d.check, wild);
+    const site = siteOf(d.value.replace(/:\d+$/, ''));
+    d.rating = rateHost(d.value, site, d.check, wildFor(site));
     if (d.rating.wildcard) d.tags.push('wildcard');
     else if (hostAlive(d.check)) d.tags.push('live');
     if (d.check?.takeover && !d.rating.wildcard) d.tags.push('takeover');
@@ -320,7 +325,10 @@ function buildModel(data) {
   const triage = data.triage || {};
   for (const [tab, list] of Object.entries(m)) {
     if (tab === 'files') continue;
-    for (const f of list) f.triage = triage[f.key]?.s || null;
+    for (const f of list) {
+      f.triage = triage[f.key]?.s || null;
+      f.note = triage[f.key]?.n || '';
+    }
   }
   return m;
 }
@@ -382,7 +390,7 @@ function filtered(tab) {
     if (ui.onlyInScope && tab === 'domains' && scoped() && f.scope !== 'in') return false;
     if (ui.onlyNew && tab !== 'files' && !f.tags?.includes('new')) return false;
     if (tab === 'files') return match(f.url + ' ' + (f.label || '') + ' ' + (f.error || ''));
-    return match(f.value + ' ' + (f.label || '') + ' ' + (f.examples || []).join(' ') + ' ' + (f.tags || []).join(' '));
+    return match(f.value + ' ' + (f.label || '') + ' ' + (f.examples || []).join(' ') + ' ' + (f.tags || []).join(' ') + ' ' + (f.note || ''));
   });
 }
 
@@ -454,22 +462,47 @@ async function setTriage(items, status) {
   if (!items.length || !ui.data) return;
   const t = (ui.data.triage ||= {});
   for (const f of items) {
-    if (status) t[f.key] = { s: status, at: Date.now() };
+    const e = { ...(t[f.key] || {}) };
+    if (status) Object.assign(e, { s: status, at: Date.now() });
+    else delete e.s;
+    if (e.s || e.n) t[f.key] = e;
     else delete t[f.key];
     f.triage = status || null;
   }
   render();
+  await sendTriage(items, { status: status || null }, 'Could not save the status, try again');
+}
+
+/** Sends a triage change to the worker (every host the rows came from, in the program view). */
+async function sendTriage(items, change, error) {
   const targets = isProgram() ? triageTargets(items, ui.data.hosts) : [{ host: ui.host, keys: items.map((f) => f.key) }];
   let failed = 0;
   for (const { host, keys } of targets) {
     try {
-      const r = await chrome.runtime.sendMessage({ type: 'triage', host, keys, status: status || null });
+      const r = await chrome.runtime.sendMessage({ type: 'triage', host, keys, ...change });
       if (!r?.ok) failed++;
     } catch {
       failed++;
     }
   }
-  if (failed) toast('Could not save the status, try again');
+  if (failed) toast(error);
+}
+
+/** A free-text note on a row ('' removes it), e.g. "reported as H1 #123456". */
+async function setNote(f, note) {
+  note = String(note || '').replace(/\s+/g, ' ').trim().slice(0, 500);
+  if (!ui.data || note === (f.note || '')) return;
+  const t = (ui.data.triage ||= {});
+  const e = { ...(t[f.key] || {}) };
+  if (note) Object.assign(e, { n: note, nat: Date.now() });
+  else delete e.n, delete e.nat;
+  if (e.s || e.n) t[f.key] = e;
+  else delete t[f.key];
+  f.note = note;
+  // let a click that moved the focus out of the field (e.g. on "Reported") land before the list is rebuilt
+  setTimeout(() => !editingNote() && render(), 300);
+  await sendTriage([f], { note }, 'Could not save the note, try again');
+  if (note) toast('Note saved');
 }
 
 function triageChip(f) {
@@ -489,7 +522,31 @@ function triageBar(f) {
     b('reported', 'Reported', 'Reported, or being written up'),
     b('fp', 'False positive', 'Not a real issue: left out of the reports and SARIF'),
     f.triage ? h('button', { class: 'mini', onclick: (e) => (e.stopPropagation(), setTriage([f], null)) }, 'Clear') : null,
+    noteInput(f),
   );
+}
+
+function noteInput(f) {
+  const input = h('input', {
+    type: 'text',
+    class: 'note-input',
+    value: f.note || '',
+    maxlength: '500',
+    spellcheck: 'false',
+    placeholder: 'Note — e.g. reported as H1 #123456, tested 12 Nov: 403',
+    title: 'A note for this row: kept per host, shown on the row, included in the reports. Enter or leaving the field saves it.',
+  });
+  input.addEventListener('click', (e) => e.stopPropagation());
+  input.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') input.blur();
+    if (e.key === 'Escape') {
+      input.value = f.note || '';
+      input.blur();
+    }
+  });
+  input.addEventListener('change', () => setNote(f, input.value));
+  return input;
 }
 
 /** Adds the status chip and the quick "mark reviewed" button to a rendered row. */
@@ -500,6 +557,7 @@ function decorateTriage(row, f) {
   const chip = triageChip(f);
   const spacer = head.querySelector(':scope > .spacer');
   if (chip) head.insertBefore(chip, spacer || null);
+  if (f.note) head.insertBefore(h('span', { class: 'row-note', title: `Note: ${f.note}` }, truncate(f.note, 60)), spacer || null);
   const quick = f.triage
     ? btn('↺', 'Clear the status', () => setTriage([f], null), 'triage-quick')
     : btn('✓', 'Mark reviewed (looked at it, nothing to report)', () => setTriage([f], 'reviewed'), 'triage-quick');
@@ -865,7 +923,8 @@ function domainDetail(d) {
   if (c.at && c.status != null && !c.pending) meta.checked = new Date(c.at).toLocaleString();
   if (d.scope) meta['program scope'] = { in: 'in scope', out: 'out of scope', unlisted: 'not listed (treated as out of scope)' }[d.scope];
   let desc = null;
-  if (d.rating?.wildcard) desc = `A made-up subdomain (${ui.data?.hostWildcard?.name}) answers the same way, so DNS has a wildcard record: this name is probably not a real host.`;
+  const wildName = (ui.data?.program ? ui.data.wildcards?.[siteOf(d.value.replace(/:\d+$/, ''))] : ui.data?.hostWildcard)?.name;
+  if (d.rating?.wildcard) desc = `A made-up subdomain (${wildName}) answers the same way, so DNS has a wildcard record: this name is probably not a real host.`;
   else if (c.takeover) desc = TAKEOVER_DESC(d.value, c.takeover);
   return detailFor({ ...d, meta, desc });
 }
@@ -1283,9 +1342,13 @@ function render() {
 }
 
 let renderTimer = null;
+/** True while the user types a note: re-rendering would throw the field (and the text) away. */
+const editingNote = () => document.activeElement?.classList?.contains('note-input');
+
 function scheduleRender() {
   clearTimeout(renderTimer);
   renderTimer = setTimeout(() => {
+    if (editingNote()) return scheduleRender();
     ui.model = buildModel(ui.data);
     render();
   }, 250);
@@ -1355,6 +1418,7 @@ function scheduleProgramReload() {
   clearTimeout(programTimer);
   programTimer = setTimeout(async () => {
     if (!isProgram()) return;
+    if (editingNote()) return scheduleProgramReload();
     ui.data = await loadProgram();
     ui.model = buildModel(ui.data);
     render();
@@ -1540,7 +1604,7 @@ function flagSummary(f) {
 
 /** Rows marked false positive stay out of the reports and SARIF. */
 const reportable = (list) => list.filter((f) => f.triage !== 'fp');
-const triageNote = (f) => (f.triage === 'reported' ? ' [reported]' : f.triage === 'reviewed' ? ' [reviewed]' : '');
+const triageNote = (f) => (f.triage === 'reported' ? ' [reported]' : f.triage === 'reviewed' ? ' [reviewed]' : '') + (f.note ? ` — note: ${f.note}` : '');
 
 /** "jquery 3.4.1 · 6 advisories · fixed in 3.5.0 · CVE-…" / npm package line, for the reports. */
 function depLine(f) {
@@ -1800,7 +1864,6 @@ function renderDomainBar() {
   const inScope = scoped() ? n((d) => d.scope === 'in') : null;
   const armed = Date.now() - hostsArmed < 6000;
   const total = Math.min(subdomainTargets().length, 500);
-  const one = !isProgram();
   el.replaceChildren(
     h(
       'span',
@@ -1814,8 +1877,8 @@ function renderDomainBar() {
       pending ? ` · checking ${pending}…` : '',
     ),
     h('span', { class: 'spacer' }),
-    one ? btn(ctBusy ? 'Asking crt.sh…' : 'Find more (crt.sh)', 'Look up subdomains in certificate-transparency logs. Sends the domain name to crt.sh, nothing to the target.', runCt) : null,
-    one && total
+    btn(ctBusy ? 'Asking crt.sh…' : 'Find more (crt.sh)', `Look up subdomains in certificate-transparency logs${isProgram() ? ', for every in-scope site' : ''}. Sends the domain name to crt.sh, nothing to the target.`, runCt),
+    total
       ? btn(
           armed ? `GET / on ${total} host${total === 1 ? '' : 's'}? Click again` : 'Check live…',
           `Sends one GET / (HTTPS, then HTTP, no cookies) to each subdomain of this site${scoped() ? ' that the program scope lists' : ''}, max 500, and a made-up one to detect wildcard DNS. Records status, title, server and takeover signatures. Deny-listed hosts are skipped. Active: sends requests to the target.`,
@@ -1827,24 +1890,33 @@ function renderDomainBar() {
 }
 
 async function runCt() {
-  if (!ui.host || ctBusy || needsOneHost()) return;
+  if (!ui.host || ctBusy) return;
+  // the program view asks crt.sh once per registrable site, through one scanned host of each
+  const hosts = isProgram() ? siteGroups(ui.data.hosts, ui.data.hosts).map((g) => g.host) : [ui.host];
   ctBusy = true;
   renderDomainBar();
-  let r = null;
-  try {
-    r = await chrome.runtime.sendMessage({ type: 'subdomains-ct', host: ui.host });
-  } catch {
-    /* worker restarting */
+  let names = 0;
+  let added = 0;
+  const errors = [];
+  for (const host of hosts) {
+    let r = null;
+    try {
+      r = await chrome.runtime.sendMessage({ type: 'subdomains-ct', host });
+    } catch {
+      /* worker restarting */
+    }
+    if (r?.ok) (names += r.names || 0), (added += r.added || 0);
+    else errors.push(r?.error || `crt.sh lookup failed for ${host}`);
   }
   ctBusy = false;
   renderDomainBar();
-  if (!r?.ok) return toast(r?.error || 'crt.sh lookup failed');
-  toast(r.names ? `${r.names} names in certificate logs · ${r.added} new` : 'No certificates logged for this domain');
+  if (errors.length === hosts.length) return toast(errors[0]);
+  const sites = hosts.length > 1 ? ` for ${hosts.length - errors.length} sites` : '';
+  toast((names ? `${names} names in certificate logs${sites} · ${added} new` : 'No certificates logged for this domain') + (errors.length ? ` · ${errors.length} failed` : ''));
 }
 
 /** Two clicks: the first shows how many hosts would be contacted, the second sends the requests. */
 async function runHostProbe() {
-  if (needsOneHost()) return;
   const hosts = subdomainTargets();
   if (!hosts.length) return toast(scoped() ? 'No in-scope subdomains of this site yet' : 'No subdomains of this site yet');
   if (Date.now() - hostsArmed > 6000) {
@@ -1856,11 +1928,29 @@ async function runHostProbe() {
     return;
   }
   hostsArmed = 0;
-  const r = await chrome.runtime.sendMessage({ type: 'probe-hosts', host: ui.host, hosts });
+  // one request per registrable site; in the program view each goes through a scanned host of that site
+  const groups = isProgram() ? siteGroups(hosts, ui.data.hosts) : [{ host: ui.host, hosts }];
+  let queued = 0;
+  let skip = 0;
+  let error = null;
+  for (const g of groups) {
+    let r = null;
+    try {
+      r = await chrome.runtime.sendMessage({ type: 'probe-hosts', host: g.host, hosts: g.hosts });
+    } catch {
+      /* worker restarting */
+    }
+    if (!r?.ok) {
+      error ||= r?.error || 'Failed';
+      continue;
+    }
+    queued += r.queued || 0;
+    skip += (r.skipped?.denied || 0) + (r.skipped?.limit || 0) + (r.skipped?.scope || 0);
+  }
   renderDomainBar();
-  if (!r?.ok) return toast(r?.error || 'Failed');
-  const skip = (r.skipped?.denied || 0) + (r.skipped?.limit || 0) + (r.skipped?.scope || 0);
-  toast(`Checking ${r.queued} host${r.queued === 1 ? '' : 's'}${skip ? ` · skipped ${skip} (deny-list / scope / limit)` : ''}`);
+  if (!queued && error) return toast(error);
+  const sites = groups.length > 1 ? ` on ${groups.length} sites` : '';
+  toast(`Checking ${queued} host${queued === 1 ? '' : 's'}${sites}${skip ? ` · skipped ${skip} (deny-list / scope / limit)` : ''}`);
   pollStatus();
 }
 
