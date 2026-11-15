@@ -8,7 +8,7 @@ JS Recon
 
 ### Passive JavaScript Recon for Bug Bounty & Pentests
 
-**A Chrome / Edge extension that mines every script, inline config, iframe, source map, lazy-loaded chunk, request and response header of the sites you browse, plus their archived JS on the Wayback Machine, for secrets, API endpoints with their HTTP method, GraphQL operations, client-side routes, DOM-XSS taint flows, hidden parameters, postMessage handlers, subdomains, cloud assets and dependency-confusion candidates, and tells you what changed when the app is redeployed. Everything runs locally in your browser.**
+**A Chrome / Edge extension that mines every script, inline config, iframe, source map, lazy-loaded chunk, request and response header of the sites you browse, plus their archived JS on the Wayback Machine, for secrets, API endpoints with their HTTP method, GraphQL operations, client-side routes, DOM-XSS taint flows, hidden parameters, postMessage handlers, subdomains (with which are live and which are high-value targets), cloud assets and dependency-confusion candidates, and tells you what changed when the app is redeployed. Everything runs locally in your browser.**
 
 🎯 [What is it](#-what-is-js-recon) • ✨ [Features](#-features) • 🖥️ [Screenshots](#️-screenshots) • 🏗️ [How it works](#️-how-it-works) • 🚀 [Install](#-install) • 🕹️ [Usage](#️-usage) • ⚙️ [Settings](#️-settings--network-activity) • 🧪 [Tests](#-tests) • 🛡️ [Safety](#️-safety--authorization)
 
@@ -22,7 +22,7 @@ JS Recon
 [![Bundlers](https://img.shields.io/badge/Lazy%20chunks-webpack%20%7C%20Next.js%20%7C%20Vite%20%7C%20ESM-8A2BE2)]()
 [![Dependencies](https://img.shields.io/badge/Runtime%20deps-0-brightgreen)]()
 [![Build](https://img.shields.io/badge/Build%20step-none-lightgrey)]()
-[![Version](https://img.shields.io/badge/Version-1.8.0-orange)]()
+[![Version](https://img.shields.io/badge/Version-1.10.0-orange)]()
 [![PRs](https://img.shields.io/badge/PRs-welcome-brightgreen)]()
 
 </div>
@@ -38,6 +38,7 @@ Modern web apps ship their attack surface to the browser: API routes, feature fl
 - **Finds what minifiers hide.** Parameter names read through `l=new URLSearchParams(location.search); l.get(…)`, names declared in config (`initial_message_url_param: "initial-message"`), `data-*` attributes, cookies, storage keys and custom headers.
 - **Confirms it at runtime.** The API calls the page really makes (method, path, parameter and header names) are recorded from the browser's own traffic. Opt-in runtime hooks add the names the code reads at runtime, request body fields and every postMessage handler.
 - **Looks back in time.** Old bundles and source maps from the Wayback Machine often still contain endpoints that have since been removed from the live app.
+- **Maps the target's hosts.** Subdomains from the code, headers, the page's own traffic and certificate-transparency logs, which of them are **live**, and which are **high-value targets** (CI/CD, admin panels, staging, VPN, exposed dashboards, possible subdomain takeovers), each with the reason.
 - **Tells you what changed.** When a site is redeployed, the endpoints, parameters and chunks that came with the new version are marked *new*. New code is the least tested code.
 - **Hands it to your proxy.** OpenAPI and Postman exports for Burp, Caido, ZAP and Postman, a GraphQL schema sketch, wordlists, and an opt-in "send GET URLs to proxy" that fills the site map.
 - **Signal over noise.** Entropy-based confidence on secrets, *interesting* tags on admin / debug / redirect-style names, library noise tagged and hideable.
@@ -53,7 +54,7 @@ Modern web apps ship their attack surface to the browser: API routes, feature fl
 | **API** | Endpoints **with their HTTP method**, coloured like Swagger UI: `axios.post()`, `http.get<T>()`, `fetch(url, { method })`, `new Request`, `xhr.open("PUT", …)`, `$.ajax({ type, url })`, `axios({ method, url })`, wrapper functions, `` `${base}/path` `` and `BASE + "/path"`, also when the **URL is held in a variable** (`let url = "action.php"; xhr.open("POST", url)`) and for bare server scripts (`action.php`, `Save.aspx`, `login.do`). **Request bodies are read from the code**: `JSON.stringify({…})`, object literals, `FormData.append()`, `URLSearchParams`, `"a=1&b=" + x` strings, `xhr.send(data)`, `fetch(…, { body })`, `axios.post(url, data)`, `$.post` / `$.ajax({ data })`, `ky({ json })` (and variables holding them), so a row reads `POST action.php { id }` and *curl* sends the real payload (`--data-raw '{"id":1}'`, form-encoded or multipart as the page does). axios `params` and `$.get` data become query parameters. Rows that send an object ID (`id`, `userId`, `order_id`, `/users/{id}`, `"/tokens/" + id`) are tagged ***idor***, and the tab is **sorted by what to test first**: sensitive names, IDOR candidates, state-changing methods, known inputs. Plus the calls the page **really makes**, tagged *observed*, with IDs normalised (`/users/{id}`). **GraphQL operations** (`gql` templates, Apollo / Relay documents) appear as QUERY / MUTATION / SUBSCRIPTION rows with their variables, root fields and full document. Every row has *curl* and *Copy*. |
 | **Endpoints / URLs** | LinkFinder-style extraction with template literals, scheme-less `host.tld/path` strings and Next.js routes. Tagged *interesting* (admin, debug, upload, token, graphql …), *static* or *noise*. |
 | **Routes** | The app's own **client-side pages** parsed out of the router config — React Router (`<Route path>`, `createBrowserRouter`), Vue Router and Angular (`loadChildren`, `canActivate`), plus any plain `{ path, component/element }` table. Includes pages that are never linked in the UI (`/admin`, `/internal`, debug consoles). Routes behind an auth / role guard are tagged *guarded*; lazy-loaded modules and redirect targets are captured too. Exported to `routes.txt`. |
-| **Domains** | Subdomains of the target found anywhere in the code, plus every host from the **Content-Security-Policy** and trusted **CORS** origins. Tagged *same site*, *third party*, *cloud*, *interesting* (dev, staging, internal, jenkins …). |
+| **Domains** | Subdomains of the target found anywhere in the code, every host from the **Content-Security-Policy** and trusted **CORS** origins, the hosts the page **really loads from** (*observed*, live by definition) and, on request, every name in the **certificate-transparency logs** (crt.sh, *ct*). **Check live** (two clicks) sends one `GET /` to each subdomain and shows its status, page title, server and final URL after redirects; a made-up name is checked too, so **wildcard DNS** is spotted and its fake hits are discounted. Each host is rated as a **high-value target** (*high* / *medium*, sorted first) from what its name says — CI/CD, admin / internal, staging / dev, monitoring, data stores, VPN / mail, origin (CDN bypass), SSO — and what it answered: Jenkins, Grafana, Kibana, phpMyAdmin, an open Elasticsearch, a directory listing, a debug page, 401 / 403, a redirect to corporate SSO, or a **subdomain-takeover** signature (S3, GitHub Pages, Heroku, Shopify and 22 more). Every rating says why. A **Live** filter shows just the hosts that answered. |
 | **Cloud** | AWS (S3, API Gateway, Lambda URLs, AppSync, RDS, ELB, CloudFront, Cognito, ARNs), Azure, Google Cloud / Firebase, DigitalOcean, Oracle, Alibaba, Rackspace, DreamHost, Cloudflare R2, Wasabi, Backblaze, Linode, IBM COS, Supabase and PaaS hosts. |
 | **Params** | Every client-side input, grouped: **query parameters** (also through minified `URLSearchParams` variables, router `query.x`, `getParameterByName()`, `/[?&]token=/` regexes and names declared in config), **request body fields** (from the request code and the runtime hooks, each linked to its endpoints, object IDs tagged *idor*), **`data-*` attributes**, **form fields** (hidden ones tagged), **request headers** (incl. `Access-Control-Allow-Headers` and observed custom headers), **cookies** (incl. `Set-Cookie`, session cookies without `HttpOnly` flagged) and **localStorage / sessionStorage keys**. Names confirmed in real traffic or at runtime are tagged *observed* / *runtime*. |
 | **Deps** | **Dependency confusion**: package names from source maps, `node_modules/…` paths, imports and embedded `package.json` are checked against `registry.npmjs.org`. Missing packages and unclaimed scopes are **critical**. |
@@ -66,9 +67,10 @@ Modern web apps ship their attack surface to the browser: API routes, feature fl
 - **GraphQL schema sketch**: types, root fields with argument types, unions / interfaces and input types inferred from the operations and fragments in the client, exported as `.graphql` together with every operation.
 - **OpenAPI 3 / Postman v2.1 exports**: methods, path and query parameters, request bodies with example values and the page's encoding (JSON, form, multipart) from the request code and the runtime hooks, custom headers, bearer auth and GraphQL operations. For Burp (API scan, or the OpenAPI Parser extension in Community), Caido (ReDocs plugin), ZAP, Postman and Insomnia.
 - **Send GET URLs to proxy** (active, two clicks): requests each concrete, harmless-looking same-site GET URL once, so it lands in the site map of the proxy your browser uses.
+- **Subdomain liveness and high-value targets** (Domains tab): *Find more (crt.sh)* adds every name from the certificate-transparency logs (sends the domain name to crt.sh, nothing to the target); *Check live* (active, two clicks) requests `/` of each subdomain over HTTPS, then HTTP, without cookies — max 500 hosts, same registrable domain only, deny-listed hosts never — and rates each one. Exported as `live-hosts.txt` and `high-value-hosts.txt` and at the top of the text / Markdown reports.
 - **Endpoint liveness** (active, two clicks): sends the same safe same-site GET requests and records the HTTP status next to each endpoint, API and route — telling live (200), **protected (401 / 403, worth testing)**, wrong-method (405), redirecting (3xx) and dead (404) apart. GET only, same site only, capped, never cross-site.
 - **Offline secret enrichment** (no network): AWS access keys are decoded to the **account number** that owns them — computed from the key ID locally, nothing is sent to AWS — alongside the key type; GCP service-account JSON and Firebase web config are tied to their **project**; and JWTs are flagged *expired* / *expires-soon* from their `exp` claim. Demo / example-looking values are tagged so they can be hidden. JS Recon never validates a discovered credential against its issuer; confirm a key yourself with the issuer's own tooling (e.g. `aws sts get-access-key-info`).
-- **Wordlists** per input kind (params, body fields, headers, cookies, storage keys, paths, path segments, URLs, subdomains), ready for ffuf, Arjun, x8 and Param Miner.
+- **Wordlists** per input kind (params, body fields, headers, cookies, storage keys, paths, path segments, URLs, subdomains, live hosts, high-value hosts), ready for ffuf, Arjun, x8, Param Miner, httpx and nuclei.
 - **Historical JS from the Wayback Machine**: one archived file per distinct script first, sensitive names and source maps first, libraries last.
 - A **static-file dumper** that zips every JS file, `.map` file and reconstructed source tree of one or more hosts for grep, semgrep or trufflehog.
 - **Content search** that greps the raw text of every scanned JS file and reconstructed source of a host for a string or `/regex/` — the things no detection rule covers: Next.js `ACTION_ID_` server-action refs, feature flags, internal hosts, build constants.
@@ -211,7 +213,7 @@ No build step and no runtime dependencies. Chrome / Edge 116+; the styled drop-d
   | **SARIF 2.1.0** | `.sarif` of the secret, sink, intel, cloud and dependency findings with their source file + line, for CI code-scanning (GitHub / GitLab security tabs, DefectDojo, ZAP) |
   | Endpoints + API as URLs | absolute URLs for ffuf, httpx, nuclei |
   | API endpoints | `METHOD URL` per line |
-  | **Wordlists** | ZIP: `params.txt`, `query-params.txt`, `body-fields.txt`, `form-fields.txt`, `data-attributes.txt`, `headers.txt`, `cookies.txt`, `storage-keys.txt`, `paths.txt`, `path-segments.txt`, `urls.txt`, `subdomains.txt` and a README with ffuf / Arjun / x8 / Param Miner commands |
+  | **Wordlists** | ZIP: `params.txt`, `query-params.txt`, `body-fields.txt`, `form-fields.txt`, `data-attributes.txt`, `headers.txt`, `cookies.txt`, `storage-keys.txt`, `paths.txt`, `path-segments.txt`, `urls.txt`, `subdomains.txt`, `live-hosts.txt`, `high-value-hosts.txt` and a README with ffuf / Arjun / x8 / Param Miner / nuclei commands |
   | **GraphQL schema + operations** | `.graphql`: the inferred schema sketch, then every operation and fragment |
   | **OpenAPI 3** | `.json` for Burp (Professional API scan, or the OpenAPI Parser extension in Community), Caido (ReDocs plugin), ZAP, Insomnia |
   | **Postman collection** | v2.1 `.json` for Postman, Insomnia and Caido (ReDocs plugin); `{{baseUrl}}`, `:id` path variables, JSON bodies, a GraphQL folder |
@@ -236,6 +238,8 @@ Everything below runs locally. This is all the traffic the extension itself crea
 | Dependency-confusion check | on | sends package **names** to `registry.npmjs.org` (cached 3 days) |
 | Runtime hooks | **off** | none; injects `src/runtime.js` into in-scope pages |
 | Wayback Machine for new hosts | **off** (button: on demand) | sends the **host name** to `web.archive.org` and fetches archived files from there, never from the target |
+| Certificate transparency (Domains → *Find more*) | manual, one click | sends the **registrable domain** to `crt.sh`; nothing goes to the target or the hosts it names |
+| Subdomain live check (Domains → *Check live*) | manual, two clicks | one `GET /` per subdomain of the same registrable domain (HTTPS, then HTTP), max 500, **no cookies**, the host's own redirects followed; plus one made-up subdomain to detect wildcard DNS. Deny-listed hosts are skipped |
 | Guess source-map locations | **off** | requests `file.js.map`, then `file.map` |
 | Crawl referenced JS | **off** | requests same-site `.js` URLs found in code |
 | Send GET URLs to proxy | manual, two clicks (Export menu) | one GET per concrete same-site URL, max 500, with your cookies; skips URLs with placeholders and anything that sounds state-changing (logout, delete, reset, revoke …); redirects are not followed |
@@ -249,9 +253,11 @@ Everything below runs locally. This is all the traffic the extension itself crea
 ```bash
 node test/run-tests.mjs        # rules, inputs, headers, lazy chunks, postMessage, routes, DOM-XSS taint, offline enrichment
                                # (AWS/GCP/Firebase + JWT expiry), provider-token rules, observed requests, GraphQL + schema,
-                               # OpenAPI / Postman / SARIF, Wayback order, ZIP, 6 MB perf check
+                               # OpenAPI / Postman / SARIF, Wayback order, crt.sh parsing, takeover / product fingerprints,
+                               # high-value rating, ZIP, 6 MB perf check
 node test/sw-harness.mjs       # service worker end to end with mocked chrome.*, fetch, npm and archive.org: iframes, chunks,
-                               # headers, observed traffic, runtime hooks, Wayback, change alerts, send to proxy, endpoint liveness, dumper
+                               # headers, observed traffic, runtime hooks, Wayback, crt.sh, subdomain live check + wildcard DNS,
+                               # change alerts, send to proxy, endpoint liveness, dumper
 node test/fp-sweep.mjs <dir>   # scan a directory of real JS and list secret hits (false-positive check)
 ```
 
@@ -273,6 +279,7 @@ src/headers.js      response-header analysis (CORS, CSP, cookies, banners, custo
 src/requests.js     observed requests (path normalisation, parameter / header names), script families, Wayback order
 src/graphql.js      GraphQL document extraction, parser and schema sketch
 src/exporters.js    OpenAPI 3 and Postman v2.1 builders, "send to proxy" URL filter
+src/hosts.js        subdomains: crt.sh parsing, live-check fingerprints (title, product, takeover, wildcard), high-value rating
 src/runtime.js      opt-in hooks that run in the page's own world
 src/sourcemap.js    source-map parsing shared by worker and UI
 src/zip.js          small ZIP writer (deflate via CompressionStream)
@@ -293,12 +300,14 @@ JS Recon is for **authorized** security testing only: pentest engagements, bug-b
 - ✅ Passive by default; active options (source-map guessing, crawling) are off and labelled
 - ✅ Runtime hooks and automatic Wayback lookups are opt-in; hooks only run on in-scope hosts
 - ✅ "Send GET URLs to proxy" needs two clicks, stays on the target's own site and skips anything that sounds state-changing
+- ✅ The subdomain live check needs two clicks, only requests `/` of the target's own subdomains, sends no cookies and never touches deny-listed hosts
 - ✅ Only names are recorded from real traffic and at runtime, never values (Authorization: scheme only)
 - ✅ Scope allow-list / deny-list and per-rule switches
 - ✅ Findings stay in your browser; nothing is uploaded
 - ✅ The dependency-confusion check only *reads* the npm registry; nothing is ever published
 - ❌ Don't point it at systems you aren't authorized to test
-- ❌ Results are leads, not verdicts: confirm secrets, dependency-confusion candidates and CSP / CORS findings before reporting
+- ❌ Results are leads, not verdicts: confirm secrets, dependency-confusion candidates, CSP / CORS findings and takeover signatures (`dig CNAME host`) before reporting
+- ❌ Check the program's scope before running the live check: a wildcard scope (`*.acme.com`) covers subdomains, a single-host scope does not
 
 **Dependency-confusion results need confirming.** A name missing from npm only matters if some build resolves it from the public registry. The scope check uses `/-/org/<scope>/package` and `/-/user/<scope>/package`; if neither answers clearly the result is *scope status unknown*, so check `npmjs.com/org/<scope>` by hand.
 

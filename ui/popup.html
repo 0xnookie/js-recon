@@ -163,6 +163,7 @@
       <label class="chk" id="interestingWrap" title="Only paths that look sensitive (admin, debug, upload, token, graphql …)"><input type="checkbox" id="onlyInteresting" /> Interesting</label>
       <label class="chk" id="newWrap" title="Only findings that first appeared in the latest version of the app's bundle" hidden><input type="checkbox" id="onlyNew" /> New</label>
       <label class="chk" id="absWrap" title="Resolve relative paths against the site origin"><input type="checkbox" id="absolute" /> Absolute</label>
+      <label class="chk" id="liveWrap" title="Only subdomains that answered: our live check, or the page loaded something from them" hidden><input type="checkbox" id="onlyLive" /> Live</label>
       <span class="spacer"></span>
       <span id="count" class="muted"></span>
       <button id="btnCopy" class="btn" title="Copy the filtered list">
@@ -171,6 +172,7 @@
       </button>
     </div>
 
+    <div id="domainBar" class="banner domains" hidden></div>
     <main id="list" class="list"></main>
     <div id="toast" class="toast" hidden></div>
 

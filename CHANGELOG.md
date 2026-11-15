@@ -5,6 +5,38 @@ All notable changes to **JS Recon** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.0] — 2026-11-15
+
+### Added
+- **Live subdomains.** The Domains tab shows which of the target's subdomains answer:
+  - hosts the page itself loads anything from (documents, scripts, images, XHR) are recorded
+    as *observed* and live, at no extra request;
+  - **Check live** (two clicks) sends one `GET /` to every subdomain of the same registrable
+    domain — HTTPS, then HTTP, no cookies, max 500, deny-listed hosts skipped — and records the
+    status, page title, server, content type and final URL after the host's own redirects;
+  - a made-up name (`jsr-<random>.<domain>`) is checked in the same run: if it answers, DNS has a
+    **wildcard** record and hosts that answer the same way are tagged *wildcard* and not rated.
+  A **Live** filter keeps only hosts that answered, and the bar above the list counts subdomains,
+  live hosts and high / medium-value targets.
+- **More subdomains from certificate transparency.** *Find more (crt.sh)* adds every name logged in
+  certificates for the registrable domain (wildcards folded, e-mail addresses and other domains
+  dropped), tagged *ct*. Sends the domain name to crt.sh only, never to the target.
+- **High-value targets.** Each subdomain is rated *high* / *medium* and sorted first, with the
+  reasons: what its name says (CI/CD and source code, data stores and infrastructure admin,
+  admin / internal, non-production, monitoring, VPN / remote access / mail, origin servers that
+  bypass the CDN, SSO, legacy, payments, APIs) and what it answered — Jenkins, GitLab, Grafana,
+  Kibana, phpMyAdmin, Kubernetes dashboard, an open Elasticsearch, a directory listing, a Django /
+  Laravel debug page, VPN portals, default server pages, 401 / 403, 5xx, a redirect to corporate SSO.
+- **Subdomain-takeover signatures**: the "no such site / bucket" pages of S3 / GCS, GitHub Pages,
+  Heroku, Shopify, Tumblr, WordPress.com, Ghost, Surge, Bitbucket, Pantheon, Fastly, Zendesk and
+  14 more are flagged *takeover* (always high value), with the `dig CNAME` command to confirm.
+- Exports: `live-hosts.txt` (URLs, for httpx / nuclei) and `high-value-hosts.txt` in the wordlists
+  ZIP, a **High-value targets** section in the text and Markdown reports, host status in the
+  Domains section, and the raw checks in the JSON report.
+
+### Fixed
+- Subdomains seen both in code and in a CSP / CORS header lost their *in code* tag.
+
 ## [1.9.0] — 2026-11-14
 
 ### Added

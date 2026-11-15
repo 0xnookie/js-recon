@@ -53,7 +53,10 @@ globalThis.fetch = async (url) => {
   fetched.push(url);
   const f = FILES[url] || Object.values(FILES).find((x) => x.match?.test(url));
   if (!f) return new Response('not found', { status: 404 });
-  return new Response(f.body, { status: f.status || 200, headers: { 'content-type': f.type || 'application/javascript' } });
+  if (f.throws) throw new TypeError('Failed to fetch'); // DNS / connection / TLS failure
+  const res = new Response(f.body, { status: f.status || 200, headers: { 'content-type': f.type || 'application/javascript', ...(f.headers || {}) } });
+  if (f.finalUrl) Object.defineProperty(res, 'url', { value: f.finalUrl }); // after redirects
+  return res;
 };
 
 // ── chrome mock ──
@@ -395,6 +398,79 @@ check(probes['https://app.acme.test/api/live']?.status === 200, 'live endpoint �
 check(probes['https://app.acme.test/api/admin']?.status === 403, 'protected endpoint → 403');
 check(probes['https://app.acme.test/api/missing']?.status === 404, 'missing endpoint → 404');
 check(!probes['https://app.acme.test/logout'] && !probes['https://evil.example/x'], 'unsafe and offsite endpoints not probed');
+
+console.log('\nSubdomains: traffic, certificate transparency, live check');
+fire('https://cdn.acme.test/img/logo.png', 'image'); // the page loaded an image from a sibling host
+fire('https://www.google-analytics.com/collect', 'ping'); // third party → not a subdomain of the target
+await drain();
+let dh = mem['host:app.acme.test'];
+check(dh.hostChecks?.['cdn.acme.test']?.seen?.status === 200, 'host the page loaded from is recorded as live without a request of our own');
+check(dh.findings['subdomains|cdn.acme.test']?.tags.includes('observed'), 'and listed under Domains, tagged observed');
+check(!dh.hostChecks?.['www.google-analytics.com'] && !dh.findings['subdomains|www.google-analytics.com'], 'third-party hosts are not recorded');
+
+FILES.crt = {
+  match: /^https:\/\/crt\.sh\/\?q=%25\.acme\.test&output=json$/,
+  type: 'application/json',
+  body: JSON.stringify([
+    { common_name: 'acme.test', name_value: 'acme.test\n*.acme.test\nwww.acme.test' },
+    { common_name: 'jenkins.acme.test', name_value: 'jenkins.acme.test\nlegacy.acme.test' },
+    { common_name: 'ops@acme.test', name_value: 'blog.acme.test\ndead.acme.test\nother.example' },
+  ]),
+};
+const ctr = await send({ type: 'subdomains-ct', host: 'app.acme.test' });
+dh = mem['host:app.acme.test'];
+await drain();
+dh = mem['host:app.acme.test'];
+check(ctr?.ok && ctr.names === 6 && ctr.added === 6, `crt.sh: ${ctr?.names} names, ${ctr?.added} new (wildcards folded, e-mail and other domains dropped)`);
+check(dh.findings['subdomains|jenkins.acme.test']?.tags.includes('ct') && !dh.findings['subdomains|other.example'], 'certificate names listed under Domains, tagged ct');
+check(dh.files['ct:acme.test']?.kind === 'ct' && dh.ct?.names === 6, 'lookup listed in Files');
+check(fetched.some((u) => u.startsWith('https://crt.sh/')) && !fetched.some((u) => /jenkins\.acme\.test/.test(u)), 'only crt.sh is contacted, never the hosts it names');
+
+FILES['https://jenkins.acme.test/'] = { status: 403, type: 'text/html', body: '<html><head><title>Dashboard [Jenkins]</title></head>', headers: { server: 'Jetty(10.0.13)', 'x-jenkins': '2.426' } };
+FILES['https://blog.acme.test/'] = { status: 404, type: 'text/html', body: "<html><body>There isn't a GitHub Pages site here.</body></html>" };
+FILES['https://legacy.acme.test/'] = { throws: true }; // no TLS → plain HTTP answers
+FILES['http://legacy.acme.test/'] = { type: 'text/html', body: '<title>Index of /</title>' };
+FILES['https://www.acme.test/'] = { type: 'text/html', body: '<title>Acme</title>', finalUrl: 'https://login.microsoftonline.com/common/oauth2/authorize' };
+FILES.deadHttps = { match: /^https?:\/\/dead\.acme\.test\//, throws: true };
+FILES.wildNo = { match: /^https?:\/\/jsr-[0-9a-f]{12}\.acme\.test\//, throws: true };
+await chrome.storage.local.set({ settings: { ...mem.settings, denyHosts: ['secret.acme.test'] } });
+await sleep(20);
+const beforeHosts = fetched.length;
+const hp = await send({ type: 'probe-hosts', host: 'app.acme.test', hosts: ['jenkins.acme.test', 'blog.acme.test', 'legacy.acme.test', 'www.acme.test', 'dead.acme.test', 'secret.acme.test', 'evil.example', 'not a host', 'JENKINS.acme.test'] });
+check(hp?.ok && hp.queued === 5 && hp.skipped.denied === 1 && hp.skipped.offsite === 1 && hp.skipped.invalid === 1, `5 hosts queued; deny-listed, offsite and invalid skipped (${JSON.stringify(hp?.skipped)})`);
+await drain();
+dh = mem['host:app.acme.test'];
+const hc = dh.hostChecks || {};
+const sentHosts = fetched.slice(beforeHosts);
+check(!sentHosts.some((u) => /secret\.acme\.test|evil\.example/.test(u)), 'deny-listed and offsite hosts never contacted');
+check(hc['jenkins.acme.test']?.status === 403 && hc['jenkins.acme.test'].product === 'Jenkins' && hc['jenkins.acme.test'].server === 'Jetty(10.0.13)', `jenkins: 403, recognised as Jenkins (${hc['jenkins.acme.test']?.title})`);
+check(hc['blog.acme.test']?.takeover === 'GitHub Pages', 'blog: GitHub Pages takeover signature');
+check(hc['legacy.acme.test']?.status === 200 && hc['legacy.acme.test'].scheme === 'http' && hc['legacy.acme.test'].product === 'Directory listing', 'legacy: falls back to plain HTTP, directory listing recognised');
+check(hc['www.acme.test']?.url === 'https://login.microsoftonline.com/common/oauth2/authorize', 'www: final URL after the redirect recorded');
+check(hc['dead.acme.test']?.status === 0 && hc['dead.acme.test'].error === 'no response' && !hc['dead.acme.test'].pending, 'dead: no response over HTTPS or HTTP');
+check(hc['cdn.acme.test']?.seen && !('status' in hc['cdn.acme.test']), 'hosts not in the list keep their traffic record');
+check(dh.hostWildcard?.status === 0 && /^jsr-[0-9a-f]{12}\.acme\.test$/.test(dh.hostWildcard.name), `made-up name checked for wildcard DNS (${dh.hostWildcard?.name}: no answer)`);
+check(sentHosts.every((u) => !/^https?:\/\/[^/]+\/./.test(u)), 'only GET / is requested');
+
+// a site with wildcard DNS: every made-up name answers the same parking page
+FILES.wild = { match: /^https:\/\/[a-z0-9-]+\.wild\.test\/$/, type: 'text/html', body: '<html><title>Parked domain</title><p>This domain may be for sale.</p></html>' };
+FILES['https://admin.wild.test/'] = { status: 401, type: 'text/html', body: '<title>Admin login</title>' };
+await send({ type: 'probe-hosts', host: 'shop.wild.test', hosts: ['shop.wild.test', 'staging.wild.test', 'admin.wild.test'] });
+await drain();
+const dw = mem['host:shop.wild.test'];
+const { rateHost } = await import('../src/hosts.js');
+check(dw.hostWildcard?.status === 200 && dw.hostWildcard.title === 'Parked domain', 'wildcard DNS detected (made-up name answers)');
+check(rateHost('staging.wild.test', 'wild.test', dw.hostChecks['staging.wild.test'], dw.hostWildcard).wildcard === true, 'a name answering like the wildcard is not rated');
+const adminRate = rateHost('admin.wild.test', 'wild.test', dw.hostChecks['admin.wild.test'], dw.hostWildcard);
+check(!adminRate.wildcard && adminRate.level === 'high', `a name answering differently is real: admin → ${adminRate.level} (${adminRate.reasons.join('; ')})`);
+await chrome.storage.local.set({ settings: { ...mem.settings, denyHosts: [] } });
+await sleep(20);
+
+const crtBackup = FILES.crt;
+FILES.crt = { ...crtBackup, status: 502, body: '<html>502 Bad Gateway</html>', type: 'text/html' };
+const ctDown = await send({ type: 'subdomains-ct', host: 'app.acme.test' });
+check(!ctDown.ok && /502.*try again later/.test(ctDown.error), `crt.sh outage reported (${ctDown.error})`);
+FILES.crt = crtBackup;
 
 const cdxBackup = FILES.cdx;
 FILES.cdx = { ...cdxBackup, status: 503, body: '<html>Internet Archive: Temporarily Offline</html>', type: 'text/html' };

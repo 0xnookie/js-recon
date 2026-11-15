@@ -889,6 +889,59 @@ console.log('\nContent search (grep helpers)');
   check(threw, 'invalid regex is rejected');
 }
 
+console.log('\nSubdomains: certificate transparency, live-check fingerprints, high-value rating');
+{
+  const { normalizeHost, parseCtNames, hostCandidates, describeResponse, sameAsWildcard, hostAlive, rateHost } = await import('../src/hosts.js');
+  const { siteOf } = await import('../src/util.js');
+
+  check(normalizeHost('API.Acme.com.') === 'api.acme.com' && normalizeHost('api.acme.com:8443') === 'api.acme.com:8443', 'host names normalised (case, trailing dot, port kept)');
+  check(!normalizeHost('*.acme.com') && !normalizeHost('acme') && !normalizeHost('a b.com') && !normalizeHost('x.com:99999') && !normalizeHost('-x.acme.com'), 'wildcards, bare labels, spaces, bad ports rejected');
+
+  const ct = parseCtNames(
+    JSON.stringify([
+      { common_name: '*.acme.com', name_value: '*.acme.com\nacme.com' },
+      { common_name: 'admin@acme.com', name_value: 'VPN.acme.com\n*.dev.acme.com\nacme.com.evil.io\nnotacme.com\nfoo..acme.com' },
+    ]),
+    'acme.com',
+  );
+  check(JSON.stringify(ct) === JSON.stringify(['acme.com', 'dev.acme.com', 'vpn.acme.com']), `crt.sh names: wildcards folded, e-mail / look-alike / other domains dropped (${ct.join(', ')})`);
+  check(parseCtNames('<html>502</html>', 'acme.com').length === 0 && parseCtNames('{}', 'acme.com').length === 0, 'non-JSON / non-array crt.sh answers give nothing');
+
+  const cand = hostCandidates(['a.acme.com', 'A.acme.com', 'acme.com', 'x.other.com', 'bad host', 'secret.acme.com', 'b.acme.com:8443'], 'acme.com', siteOf, (n) => n === 'secret.acme.com');
+  check(JSON.stringify(cand.hosts) === JSON.stringify(['a.acme.com', 'acme.com', 'b.acme.com:8443']), `live-check candidates: same site only, de-duplicated, ports kept (${cand.hosts.join(', ')})`);
+  check(cand.skipped.offsite === 1 && cand.skipped.invalid === 1 && cand.skipped.denied === 1, 'offsite, invalid and deny-listed hosts counted as skipped');
+
+  const jen = describeResponse('<html><head><title>\n  Dashboard [Jenkins]\n</title>');
+  check(jen.title === 'Dashboard [Jenkins]' && jen.product === 'Jenkins', 'title read and product recognised (Jenkins)');
+  check(describeResponse('<title>Sign in &middot; GitLab</title>').title === 'Sign in · GitLab' && describeResponse('<title>Sign in &middot; GitLab</title>').product === 'GitLab', 'HTML entities in titles decoded; GitLab wins over the generic login page');
+  check(describeResponse('{"name":"node-1","cluster_name":"prod","tagline" : "You Know, for Search"}').product === 'Elasticsearch', 'open Elasticsearch API recognised from its JSON banner');
+  check(describeResponse('<Error><Code>NoSuchBucket</Code><Message>The specified bucket does not exist</Message></Error>').takeover === 'AWS S3 / GCS bucket', 'takeover signature: missing S3 / GCS bucket');
+  check(describeResponse("<p>There isn't a GitHub Pages site here.</p>").takeover === 'GitHub Pages', 'takeover signature: GitHub Pages');
+  check(describeResponse('<script src="https://www.herokucdn.com/error-pages/no-such-app.html"></script>').takeover === 'Heroku', 'takeover signature: Heroku');
+  check(!describeResponse('<title>Acme Help Center</title><p>Powered by helpjuice and agilecrm, on tilda.ws</p>').takeover, 'healthy pages that merely mention a provider are not takeover candidates');
+  check(!describeResponse('<title>Acme</title><p>Welcome</p>').product, 'ordinary pages get no product');
+
+  const wild = { status: 200, title: 'Parked', length: 1000 };
+  check(sameAsWildcard({ status: 200, title: 'Parked', length: 1012 }, wild) && !sameAsWildcard({ status: 200, title: 'Admin', length: 1000 }, wild) && !sameAsWildcard({ status: 401, title: 'Parked', length: 1000 }, wild), 'wildcard comparison: same status + title + size only');
+  check(!sameAsWildcard({ status: 200, title: 'Parked', length: 1000 }, { status: 0 }), 'no wildcard when the made-up name does not answer');
+  check(hostAlive({ status: 403 }) && hostAlive({ seen: { status: 200 } }) && !hostAlive({ status: 0, error: 'no response' }) && !hostAlive({ pending: true }), 'live = answered our check or loaded by the page');
+
+  const level = (h, rec, w) => rateHost(h, 'acme.com', rec, w).level;
+  check(level('jenkins.acme.com') === 'high' && level('phpmyadmin.acme.com') === 'high' && level('k8s-dashboard.acme.com') === 'high', 'CI/CD and infrastructure names → high');
+  check(level('staging.acme.com') === 'medium' && level('vpn2.acme.com') === 'medium' && level('admin.acme.com') === 'medium', 'non-production / VPN / admin names alone → medium');
+  check(level('dev-api.acme.com') === 'high', 'several signals add up (dev + api → high)');
+  check(level('apistaging.acme.com') === 'medium' && level('webadmin.acme.com') === 'medium', 'words glued to a label part still count (apistaging, webadmin)');
+  check(!level('www.acme.com') && !level('api.acme.com') && !level('es.acme.com') && !level('badminton.acme.com') && !level('acme.com'), 'plain / locale / look-alike names are not rated (www, api, es, badminton)');
+  check(level('admin.acme.com', { status: 403 }) === 'high', 'a protected (403) admin host → high');
+  check(level('blog.acme.com', { status: 404, takeover: 'GitHub Pages' }) === 'high', 'takeover signature → high, whatever the name');
+  check(level('intranet2.acme.com', { status: 0, error: 'no response' }) === 'medium' && level('jenkins.acme.com', { status: 0 }) === 'medium', 'no HTTP answer caps the rating at medium');
+  check(level('apps.acme.com', { status: 200, url: 'https://login.microsoftonline.com/x/oauth2/authorize' }) === 'medium', 'an app that sends you to corporate SSO → medium');
+  check(level('files.acme.com', { status: 200, product: 'Directory listing' }) === 'high', 'an open directory listing → high');
+  const w = rateHost('staging.acme.com', 'acme.com', { status: 200, title: 'Parked', length: 990 }, wild);
+  check(w.wildcard && !w.level, 'a host answering like the wildcard record is not rated');
+  check(rateHost('jenkins.acme.com', 'acme.com', { status: 403, product: 'Jenkins' }).reasons.join('|') === 'CI/CD / source code (jenkins)|answers as Jenkins|protected (403)', 'reasons say why');
+}
+
 console.log('\nPerformance');
 let big = '';
 const chunk = fixture + negatives + 'function a(e,t){return e.map(function(n){return n.id+"/"+t})}var o={a:1,b:"/x/y",c:[1,2,3]};'.repeat(50);

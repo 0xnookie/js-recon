@@ -6,6 +6,7 @@ import { searchHost } from './search.js';
 import { ZipWriter } from '../src/zip.js';
 import { buildOpenApi, buildPostman, buildSarif, replayCandidates } from '../src/exporters.js';
 import { parseDefinition, schemaSketch } from '../src/graphql.js';
+import { rateHost, hostAlive } from '../src/hosts.js';
 
 const params = new URLSearchParams(location.search);
 const FULL = params.get('view') === 'full';
@@ -223,9 +224,9 @@ function buildModel(data) {
       continue;
     }
     if (f.category === 'subdomains') {
-      // hosts from CSP / CORS headers keep their own tag; the rest were found in code
-      const fromHeaders = f.tags?.some((t) => t === 'csp' || t === 'cors');
-      addDomain(f.value, null, fromHeaders ? f.tags : ['in-code', ...(f.tags || [])], f.hits || 1, f);
+      // seen in code, or only in CSP / CORS headers, certificate logs (ct) or the page's own traffic (observed)
+      const inCode = !f.sources?.length || f.sources.some((s) => !/^(?:headers|ct|observed):/.test(s.file));
+      addDomain(f.value, null, inCode ? ['in-code', ...(f.tags || [])] : f.tags || [], f.hits || 1, f);
       continue;
     }
     (m[f.category] || m.intel).push(f);
@@ -244,9 +245,30 @@ function buildModel(data) {
   m.params = [...params.values()].sort(
     (a, b) => kindRank(a) - kindRank(b) || paramRank(b) - paramRank(a) || b.count - a.count || a.value.localeCompare(b.value),
   );
+  // the target's own subdomains: what answered (our check or the page's traffic) and how worth testing they are
+  const checks = data.hostChecks || {};
+  const wild = data.hostWildcard?.status ? data.hostWildcard : null;
+  for (const d of domains.values()) {
+    if (!d.tags.includes('same-site') || d.value.includes('*')) continue;
+    d.check = checks[d.value.toLowerCase()] || null;
+    // a check the worker never finished (restarted mid-run) shouldn't say "checking…" forever
+    if (d.check?.pending && Date.now() - (d.check.at || 0) > 5 * 60000) {
+      const { pending, ...rest } = d.check;
+      d.check = rest.seen ? rest : null;
+    }
+    d.rating = rateHost(d.value, pageSite, d.check, wild);
+    if (d.rating.wildcard) d.tags.push('wildcard');
+    else if (hostAlive(d.check)) d.tags.push('live');
+    if (d.check?.takeover && !d.rating.wildcard) d.tags.push('takeover');
+  }
   const has = (x, t) => (x.tags.includes(t) ? 1 : 0);
   m.domains = [...domains.values()].sort(
-    (a, b) => has(b, 'same-site') - has(a, 'same-site') || has(b, 'interesting') - has(a, 'interesting') || a.value.localeCompare(b.value),
+    (a, b) =>
+      has(b, 'same-site') - has(a, 'same-site') ||
+      (b.rating?.score || 0) - (a.rating?.score || 0) ||
+      has(b, 'live') - has(a, 'live') ||
+      has(b, 'interesting') - has(a, 'interesting') ||
+      a.value.localeCompare(b.value),
   );
   const bySev = (a, b) =>
     (SEV_RANK[b.severity] || 0) - (SEV_RANK[a.severity] || 0) ||
@@ -316,7 +338,8 @@ function filtered(tab) {
     if (SEV_TABS.has(tab) && (SEV_RANK[f.severity] || 0) < minSev) return false;
     if (tab === 'secrets' && ui.hideTentative && (f.confidence === 'tentative' || f.tags?.includes('example'))) return false;
     if (ui.hideNoise && NOISE_TABS.has(tab) && f.tags?.some((t) => t === 'noise' || t === 'static')) return false;
-    if (ui.onlyInteresting && INTERESTING_TABS.has(tab) && !f.tags?.some((t) => t === 'interesting' || t === 'idor')) return false;
+    if (ui.onlyInteresting && INTERESTING_TABS.has(tab) && !f.tags?.some((t) => t === 'interesting' || t === 'idor') && !f.rating?.level) return false;
+    if (ui.onlyLive && tab === 'domains' && !f.tags?.includes('live')) return false;
     if (ui.onlyNew && tab !== 'files' && !f.tags?.includes('new')) return false;
     if (tab === 'files') return match(f.url + ' ' + (f.label || '') + ' ' + (f.error || ''));
     return match(f.value + ' ' + (f.label || '') + ' ' + (f.examples || []).join(' ') + ' ' + (f.tags || []).join(' '));
@@ -358,10 +381,15 @@ function srcSummary(f) {
   return h('span', { class: 'src', title: f.sources.map(srcLabel).join('\n') }, truncate(srcLabel(f.sources[0]), 42) + more);
 }
 
-const HIDDEN_CHIPS = new Set(['js', 'write']);
+const HIDDEN_CHIPS = new Set(['js', 'write', 'live']); // "live" is shown as the status chip
 const CHIP_TITLES = {
   idor: 'Sends an object ID (path segment, body field or query parameter): try another user\'s ID (IDOR / BOLA)',
   interesting: 'Name suggests a sensitive function (admin, upload, token, payment …)',
+  ct: 'Found in certificate-transparency logs (crt.sh)',
+  observed: 'Seen in the browser\'s real traffic',
+  takeover: 'Answers with a hosting provider\'s "no such site / bucket" page: possible subdomain takeover',
+  wildcard: 'Answers exactly like a made-up subdomain (wildcard DNS): probably not a real host',
+  'in-code': 'Found in the JavaScript / HTML',
 };
 function chips(tags) {
   return (tags || []).filter((t) => !HIDDEN_CHIPS.has(t)).map((t) => h('span', { class: `chip ${t}`, title: CHIP_TITLES[t] || '' }, t.replace(/-/g, ' ')));
@@ -586,20 +614,57 @@ function depRow(f) {
   return expandable(row, f.key, () => detailFor(f));
 }
 
+const VALUE_TITLE = { high: 'High-value target', medium: 'Worth a look' };
+
 function domainRow(d) {
+  const r = d.rating;
+  const c = d.check;
+  const openUrl = `${c?.scheme || c?.seen?.scheme || 'https'}://${d.value}`;
   const row = h(
     'div',
-    { class: 'row link' },
+    { class: `row link${r?.level === 'high' ? ' sev-high' : ''}` },
     head(
-      h('span', { class: 'value mono' }, d.value),
+      r?.level ? h('span', { class: `pill ${r.level}`, title: `${VALUE_TITLE[r.level]}:\n${r.reasons.join('\n')}` }, r.level) : null,
+      h('span', { class: 'value mono', title: d.value }, d.value),
+      hostChip(d),
+      c?.title && !r?.wildcard ? h('span', { class: 'src host-title', title: c.title }, truncate(c.title, 48)) : null,
       chips(d.tags),
       h('span', { class: 'spacer' }),
       h('span', { class: 'src' }, `${d.count}×`),
-      d.value.includes('*') ? null : btn('Open', 'https://' + d.value, () => chrome.tabs.create({ url: 'https://' + d.value, active: false })),
+      d.value.includes('*') ? null : btn('Open', openUrl, () => chrome.tabs.create({ url: openUrl, active: false })),
       btn('Copy', 'Copy', () => copy(d.value)),
     ),
   );
-  return expandable(row, d.key, () => detailFor(d));
+  return expandable(row, d.key, () => domainDetail(d));
+}
+
+/** Status of a subdomain: our check (GET /) or, failing that, what the page loaded from it. */
+function hostChip(d) {
+  const c = d.check;
+  if (!c || d.rating?.wildcard) return null;
+  if (c.pending && !c.seen) return h('span', { class: 'chip probe pending', title: 'Checking…' }, '…');
+  const s = c.status || c.seen?.status || 0;
+  if (!s) return h('span', { class: 'chip probe gone', title: c.error === 'timeout' ? 'Timed out' : 'No HTTP(S) answer: no DNS record, connection refused or a TLS error' }, 'dead');
+  const via = c.status ? `GET ${c.scheme || 'https'}://${d.value}/` : 'loaded by the page';
+  const title = [`${s} · ${via}`, c.url ? `→ ${c.url}` : '', c.server ? `server: ${c.server}` : ''].filter(Boolean).join('\n');
+  return h('span', { class: `chip probe ${statusClass(s)}`, title }, String(s) + (c.url ? ' →' : ''));
+}
+
+const TAKEOVER_DESC = (host, svc) =>
+  `${host} answers with the page ${svc} shows for a site / bucket that no longer exists. If its DNS CNAME still points at ${svc}, anyone could claim that resource and serve content on this subdomain (subdomain takeover). Confirm with: dig CNAME ${host.replace(/:\d+$/, '')}`;
+
+function domainDetail(d) {
+  const c = d.check || {};
+  const meta = {};
+  if (d.rating?.reasons?.length) meta.why = d.rating.reasons;
+  if (c.status != null && !c.pending) meta.status = c.status ? `${c.status} (${c.scheme || 'https'})` : c.error || 'no response';
+  if (c.seen) meta['loaded by the page'] = `${c.seen.status} (${c.seen.type})`;
+  Object.assign(meta, { 'final URL': c.url, title: c.title, product: c.product, server: c.server, 'x-powered-by': c.poweredBy, 'content-type': c.type });
+  if (c.at && c.status != null && !c.pending) meta.checked = new Date(c.at).toLocaleString();
+  let desc = null;
+  if (d.rating?.wildcard) desc = `A made-up subdomain (${ui.data?.hostWildcard?.name}) answers the same way, so DNS has a wildcard record: this name is probably not a real host.`;
+  else if (c.takeover) desc = TAKEOVER_DESC(d.value, c.takeover);
+  return detailFor({ ...d, meta, desc });
 }
 
 function paramRow(p) {
@@ -611,7 +676,7 @@ function paramRow(p) {
   return expandable(row, p.key, () => detailFor(p));
 }
 
-const KIND_LABEL = { script: 'script', crawled: 'crawled', chunk: 'chunk', manual: 'manual', inline: 'inline', html: 'DOM', sourcemap: 'map', headers: 'headers', observed: 'traffic', runtime: 'runtime', wayback: 'wayback' };
+const KIND_LABEL = { script: 'script', crawled: 'crawled', chunk: 'chunk', manual: 'manual', inline: 'inline', html: 'DOM', sourcemap: 'map', headers: 'headers', observed: 'traffic', runtime: 'runtime', wayback: 'wayback', ct: 'crt.sh' };
 
 async function downloadSources(f) {
   toast('Rebuilding sources…');
@@ -782,6 +847,7 @@ function renderToolbar() {
   $('#noiseWrap').hidden = !NOISE_TABS.has(t);
   $('#interestingWrap').hidden = !INTERESTING_TABS.has(t);
   $('#absWrap').hidden = t !== 'endpoints' && t !== 'api';
+  $('#liveWrap').hidden = t !== 'domains';
   $('#newWrap').hidden = !ui.data?.changes?.length || t === 'files';
 }
 
@@ -881,6 +947,7 @@ function render() {
   renderToolbar();
   renderChangeBanner();
   renderAskBanner();
+  renderDomainBar();
   const list = $('#list');
   const scroll = list.scrollTop;
   list.replaceChildren();
@@ -1127,7 +1194,28 @@ function exportJson(data) {
     files: Object.values(data.files),
     findings: Object.values(data.findings),
     chunks: Object.keys(data.chunkUrls || {}),
+    hosts: data.hostChecks || {},
+    wildcard: data.hostWildcard || null,
   };
+}
+
+/** Same-site subdomains with a high / medium rating, best first. */
+const valuedHosts = () => ui.model.domains.filter((d) => d.rating?.level);
+
+/** "200 https" / "dead" / "" for the reports. */
+function hostStatus(d) {
+  const c = d.check;
+  if (!c || d.rating?.wildcard) return d.rating?.wildcard ? 'wildcard' : '';
+  if (c.pending && !c.seen) return 'checking';
+  const s = c.status || c.seen?.status;
+  return s ? `${s}${c.url ? ' → ' + c.url : ''}` : c.status === 0 ? 'dead' : '';
+}
+
+/** https://host of every live, non-wildcard subdomain (for httpx / nuclei / aquatone). */
+function liveHostUrls() {
+  return ui.model.domains
+    .filter((d) => d.tags.includes('live') && !d.tags.includes('wildcard'))
+    .map((d) => `${d.check?.scheme || d.check?.seen?.scheme || 'https'}://${d.value}`);
 }
 
 function textReport() {
@@ -1142,7 +1230,8 @@ function textReport() {
   section('API endpoints', m.api.map((f) => (f.meta?.graphql ? `${apiParts(f).method} ${apiParts(f).path} (GraphQL)` : `${apiParts(f).method} ${resolveUrl(apiParts(f).path)}${bodyNote(f)}`)));
   section('Endpoints', m.endpoints.filter((f) => !f.tags.includes('noise')).map((f) => f.value));
   section('URLs', m.urls.filter((f) => !f.tags.includes('noise')).map((f) => f.value));
-  section('Domains', m.domains.map((d) => `${d.value}\t${d.tags.join(',')}`));
+  section('High-value targets', valuedHosts().map((d) => `[${d.rating.level.toUpperCase()}] ${d.value}\t${hostStatus(d)}\t${d.rating.reasons.join('; ')}`));
+  section('Domains', m.domains.map((d) => `${d.value}\t${d.tags.join(',')}${hostStatus(d) ? '\t' + hostStatus(d) : ''}`));
   section('Cloud', m.cloud.map((f) => `[${f.severity}] ${f.label}: ${f.value}`));
   section('Parameters', m.params.map((p) => (p.kind === 'query' ? p.value : `${p.value}\t(${p.kind})`)));
   section('Dependencies', m.deps.map((f) => `[${f.severity.toUpperCase()}] ${f.value}\t${f.label}${f.meta?.latest ? '\tv' + f.meta.latest : ''}`));
@@ -1173,7 +1262,8 @@ function mdReport() {
   section('Cloud', m.cloud.map((f) => `- **[${f.severity}]** ${esc(f.label)}: \`${esc(f.value)}\``));
   section('Dependencies', m.deps.map((f) => `- **[${f.severity}]** \`${esc(f.value)}\` — ${esc(f.label)}`));
   section('Intel', m.intel.map((f) => `- **[${f.severity}]** ${esc(f.label)}: ${esc(f.value)}`));
-  section('Domains', m.domains.map((d) => `- \`${esc(d.value)}\`${tagsOf(d)}`));
+  section('High-value targets', valuedHosts().map((d) => `- **[${d.rating.level}]** \`${esc(d.value)}\`${hostStatus(d) ? ` — ${esc(hostStatus(d))}` : ''} — ${esc(d.rating.reasons.join('; '))}`));
+  section('Domains', m.domains.map((d) => `- \`${esc(d.value)}\`${hostStatus(d) ? ` ${esc(hostStatus(d))}` : ''}${tagsOf(d)}`));
   return out.join('\n');
 }
 
@@ -1322,6 +1412,93 @@ async function runProbe() {
   pollStatus();
 }
 
+// ── subdomains: certificate transparency (crt.sh) and live check (opt-in, two clicks) ──
+
+/** Same-site subdomains in the Domains tab, high-value names first (the check is capped). */
+function subdomainTargets() {
+  return ui.model.domains.filter((d) => d.tags.includes('same-site') && !d.value.includes('*')).map((d) => d.value);
+}
+
+let hostsArmed = 0;
+let ctBusy = false;
+
+function renderDomainBar() {
+  const el = $('#domainBar');
+  const show = ui.tab === 'domains' && !!ui.data;
+  el.hidden = !show;
+  if (!show) return;
+  const own = ui.model.domains.filter((d) => d.tags.includes('same-site') && !d.value.includes('*'));
+  const n = (pred) => own.filter(pred).length;
+  const live = n((d) => d.tags.includes('live'));
+  const high = n((d) => d.rating?.level === 'high');
+  const medium = n((d) => d.rating?.level === 'medium');
+  const pending = n((d) => d.check?.pending);
+  const wild = n((d) => d.tags.includes('wildcard'));
+  const armed = Date.now() - hostsArmed < 6000;
+  const total = Math.min(own.length, 500);
+  el.replaceChildren(
+    h(
+      'span',
+      { title: 'Subdomains of the target\'s registrable domain found in code, headers, traffic and certificate logs' },
+      h('b', {}, `${own.length} subdomain${own.length === 1 ? '' : 's'}`),
+      ` · ${live} live`,
+      high ? ` · ${high} high value` : '',
+      medium ? ` · ${medium} medium` : '',
+      wild ? ` · ${wild} wildcard` : '',
+      pending ? ` · checking ${pending}…` : '',
+    ),
+    h('span', { class: 'spacer' }),
+    btn(ctBusy ? 'Asking crt.sh…' : 'Find more (crt.sh)', 'Look up subdomains in certificate-transparency logs. Sends the domain name to crt.sh, nothing to the target.', runCt),
+    own.length
+      ? btn(
+          armed ? `GET / on ${total} host${total === 1 ? '' : 's'}? Click again` : 'Check live…',
+          'Sends one GET / (HTTPS, then HTTP, no cookies) to each subdomain of this site, max 500, and a made-up one to detect wildcard DNS. Records status, title, server and takeover signatures. Deny-listed hosts are skipped. Active: sends requests to the target.',
+          runHostProbe,
+          armed ? 'primary' : '',
+        )
+      : null,
+  );
+}
+
+async function runCt() {
+  if (!ui.host || ctBusy) return;
+  ctBusy = true;
+  renderDomainBar();
+  let r = null;
+  try {
+    r = await chrome.runtime.sendMessage({ type: 'subdomains-ct', host: ui.host });
+  } catch {
+    /* worker restarting */
+  }
+  ctBusy = false;
+  renderDomainBar();
+  if (!r?.ok) return toast(r?.error || 'crt.sh lookup failed');
+  toast(r.names ? `${r.names} names in certificate logs · ${r.added} new` : 'No certificates logged for this domain');
+}
+
+/** Two clicks: the first shows how many hosts would be contacted, the second sends the requests. */
+async function runHostProbe() {
+  const hosts = subdomainTargets();
+  if (!hosts.length) return toast('No subdomains of this site yet');
+  if (Date.now() - hostsArmed > 6000) {
+    hostsArmed = Date.now();
+    renderDomainBar();
+    setTimeout(() => {
+      if (hostsArmed && Date.now() - hostsArmed >= 6000) renderDomainBar();
+    }, 6100);
+    return;
+  }
+  hostsArmed = 0;
+  const r = await chrome.runtime.sendMessage({ type: 'probe-hosts', host: ui.host, hosts });
+  renderDomainBar();
+  if (!r?.ok) return toast(r?.error || 'Failed');
+  const skip = (r.skipped?.denied || 0) + (r.skipped?.limit || 0);
+  toast(`Checking ${r.queued} host${r.queued === 1 ? '' : 's'}${skip ? ` · skipped ${skip} (deny-list / limit)` : ''}`);
+  pollStatus();
+}
+
+const statusClass = (s) => (s >= 200 && s < 300 ? 'ok' : s === 401 || s === 403 ? 'auth' : s === 404 || s === 410 ? 'gone' : s >= 500 ? 'err' : 'other');
+
 // status code → a short labelled chip on endpoint / API / route rows
 function probeChip(absUrl) {
   if (!ui.data?.probes || !absUrl) return null;
@@ -1337,7 +1514,7 @@ function probeChip(absUrl) {
   if (p.redirect) return h('span', { class: 'chip probe redir', title: 'Redirects (often to login)' }, '3xx');
   const s = p.status;
   if (!s) return h('span', { class: 'chip probe err', title: p.error || 'No response' }, 'ERR');
-  const cls = s >= 200 && s < 300 ? 'ok' : s === 401 || s === 403 ? 'auth' : s === 404 || s === 410 ? 'gone' : s >= 500 ? 'err' : 'other';
+  const cls = statusClass(s);
   const title = s === 401 || s === 403 ? 'Exists but protected — worth testing' : s === 405 ? 'Exists (method not allowed for GET)' : s >= 200 && s < 300 ? 'Live' : '';
   return h('span', { class: `chip probe ${cls}`, title }, String(s));
 }
@@ -1369,6 +1546,8 @@ const WORDLIST_FILES = [
   ['path-segments.txt', 'single path segments for directory brute force'],
   ['urls.txt', 'absolute URLs (httpx, nuclei, katana)'],
   ['subdomains.txt', 'same-site hostnames (dnsx, httpx)'],
+  ['live-hosts.txt', 'subdomains that answered, as URLs (httpx, nuclei)'],
+  ['high-value-hosts.txt', 'subdomains rated high / medium value, best first'],
 ];
 
 /** One ZIP of plain wordlists for ffuf, Arjun, x8, Param Miner … built from everything found for this host. */
@@ -1402,6 +1581,8 @@ async function exportWordlists() {
     'path-segments.txt': uniq([...paths, ...routePaths()].flatMap((p) => p.split('/')).filter((s) => /^[\w.~-]{1,80}$/.test(s))),
     'urls.txt': absoluteUrls(),
     'subdomains.txt': uniq(m.domains.filter((d) => d.tags.includes('same-site') && !d.value.includes('*')).map((d) => d.value.replace(/:\d+$/, ''))),
+    'live-hosts.txt': uniq(liveHostUrls()),
+    'high-value-hosts.txt': [...new Set(valuedHosts().map((d) => d.value))],
   };
   const zip = new ZipWriter();
   const written = [];
@@ -1426,6 +1607,7 @@ async function exportWordlists() {
     `  ffuf -u "https://${h}/api/FUZZ" -w path-segments.txt -mc all -ac`,
     `  ffuf -u "https://${h}/ENDPOINT" -H "FUZZ: 1" -w headers.txt -mc all -ac`,
     '  httpx -l urls.txt -sc -title        dnsx -l subdomains.txt -resp',
+    '  nuclei -l live-hosts.txt             httpx -l high-value-hosts.txt -sc -title -td',
     '  Burp Param Miner: Settings → "use custom wordlist" → params.txt (or headers.txt for header guessing)',
     '',
   ].join('\n');
@@ -1510,6 +1692,7 @@ function bind() {
   bindCheckbox('#onlyInteresting', 'onlyInteresting', false);
   bindCheckbox('#onlyNew', 'onlyNew', false);
   bindCheckbox('#absolute', 'absolute');
+  bindCheckbox('#onlyLive', 'onlyLive', false);
   $('#btnCopy').addEventListener('click', copyVisible);
 
   $('#btnPause').addEventListener('click', async () => {

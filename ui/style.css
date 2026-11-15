@@ -823,6 +823,31 @@ body.full .host-select {
   color: var(--text);
 }
 
+/* Domains tab: subdomain counts, crt.sh lookup and the live check */
+.banner.domains {
+  gap: 6px;
+  padding-right: 10px;
+}
+
+.banner.domains::before {
+  background: var(--ok);
+}
+
+.banner.domains > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* the page title of a live subdomain gives way before the host name does */
+.row .src.host-title {
+  flex: 0 100 auto;
+  min-width: 0;
+  max-width: 240px;
+  font-style: italic;
+}
+
 /* "ask first": this tab's site isn't approved; findings shown are from an earlier scan */
 .banner.ask {
   gap: 6px;
@@ -1537,6 +1562,7 @@ a.value {
 }
 
 .chip.error,
+.chip.takeover,
 .chip.not-on-npm,
 .chip.scope-unclaimed,
 .chip.unpublished,
@@ -1578,6 +1604,7 @@ a.value {
 
 .chip.private-scope,
 .chip.in-code,
+.chip.ct,
 .chip.lazy,
 .chip.redirect,
 .chip.temporary {
@@ -1585,6 +1612,7 @@ a.value {
 }
 
 .chip.conf.tentative,
+.chip.wildcard,
 .chip.noise,
 .chip.static,
 .chip.example,

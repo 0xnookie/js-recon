@@ -2,7 +2,7 @@
 // verifies discovered npm dependencies (dependency confusion).
 
 import { analyze, mergeBody } from './analyzer.js';
-import { buildRules, makeSubdomainRule, packageRoot, classifyLink, INTERESTING_RE, inputFinding, apiEndpoint, analyzeMessageHandler, POSTMESSAGE_DESC } from './rules.js';
+import { buildRules, makeSubdomainRule, packageRoot, classifyLink, INTERESTING_RE, DEV_HOST_RE, CLOUD_HOST_RE, inputFinding, apiEndpoint, analyzeMessageHandler, POSTMESSAGE_DESC } from './rules.js';
 import { observedRequest, normalizePath, orderCaptures, scriptFamily } from './requests.js';
 import { replayCandidates } from './exporters.js';
 import { DEFAULT_SETTINGS, getSettings, saveSettings } from './settings.js';
@@ -10,6 +10,7 @@ import { SEV_RANK, sha1, siteOf, hostMatches, hostOf, truncate } from './util.js
 import { sourceMapRef, decodeDataUri, parseSourceMap, mapEntries, cleanSourcePath, probeCandidates } from './sourcemap.js';
 import { findChunks } from './chunks.js';
 import { analyzeHeaders } from './headers.js';
+import { parseCtNames, hostCandidates, describeResponse } from './hosts.js';
 
 const KEY = (host) => 'host:' + host;
 const MAX_SOURCES = 8;
@@ -430,6 +431,7 @@ async function runJob(job) {
   if (job.kind === 'wayback') return scanWayback(job);
   if (job.kind === 'replay') return replayRequest(job);
   if (job.kind === 'probe') return probeRequest(job);
+  if (job.kind === 'hostprobe') return hostProbe(job);
 }
 
 // ───────────────────────── scanners ─────────────────────────
@@ -870,6 +872,144 @@ async function probeRequest(job) {
   data.probes ||= {};
   data.probes[job.url] = { ...rec, at: Date.now() };
   markDirty(job.host);
+}
+
+// ── subdomain liveness (opt-in, two clicks): one GET / per subdomain of the target's own registrable
+// domain, HTTPS first, then HTTP. No cookies. The host's own redirects are followed so the final page
+// (login, SSO, product) can be recognised. A made-up subdomain is checked too, to spot wildcard DNS.
+// Deny-listed hosts and other sites are never contacted.
+
+const MAX_HOST_PROBES = 500;
+const HOST_BODY_BYTES = 256 * 1024;
+
+async function probeHosts({ host, hosts }) {
+  await ready();
+  if (!host || !Array.isArray(hosts)) return { ok: false, error: 'Nothing to check' };
+  const site = siteOf(host.replace(/:\d+$/, ''));
+  if (!site.includes('.') || /^[\d.]+$/.test(site)) return { ok: false, error: 'Not a domain name' };
+  const deny = state.settings.denyHosts;
+  const { hosts: list, skipped } = hostCandidates(hosts.slice(0, 20000).map(String), site, siteOf, (n) => hostMatches(n, deny));
+  const send = list.slice(0, MAX_HOST_PROBES);
+  if (!send.length) return { ok: true, queued: 0, skipped: { ...skipped, limit: 0 } };
+  const data = await getHost(host);
+  data.hostChecks ||= {};
+  for (const h of send) {
+    const prev = data.hostChecks[h];
+    data.hostChecks[h] = { pending: true, at: Date.now(), ...(prev?.seen ? { seen: prev.seen } : {}) };
+    enqueue({ kind: 'hostprobe', host, id: h, target: h });
+  }
+  // wildcard DNS: if a name nobody registered answers, every name answers the same way
+  const rnd = [...crypto.getRandomValues(new Uint8Array(6))].map((b) => b.toString(16).padStart(2, '0')).join('');
+  const wild = `jsr-${rnd}.${site}`;
+  if (!hostMatches(wild, deny)) {
+    data.hostWildcard = { pending: true, name: wild, at: Date.now() };
+    enqueue({ kind: 'hostprobe', host, id: wild, target: wild, wildcard: true });
+  }
+  markDirty(host);
+  return { ok: true, queued: send.length, skipped: { ...skipped, limit: list.length - send.length } };
+}
+
+/** Reads at most `max` characters of a response body, then stops the download. */
+async function readCapped(res, max) {
+  if (!res.body?.getReader) {
+    const t = await res.text();
+    return { text: t.slice(0, max), bytes: t.length };
+  }
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let text = '';
+  let bytes = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      text += dec.decode(value, { stream: true });
+      if (text.length >= max) break;
+    }
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+  return { text: text.slice(0, max), bytes };
+}
+
+async function getRoot(url) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 12000);
+  try {
+    const res = await fetch(url, { method: 'GET', credentials: 'omit', cache: 'no-store', redirect: 'follow', signal: ctrl.signal });
+    const { text, bytes } = await readCapped(res, HOST_BODY_BYTES);
+    const hdr = (k) => res.headers.get(k) || undefined;
+    const rec = { status: res.status, length: Number(hdr('content-length')) || bytes, server: hdr('server'), poweredBy: hdr('x-powered-by'), type: hdr('content-type')?.split(';')[0] };
+    if (res.url && res.url !== url) rec.url = res.url;
+    return { ...rec, ...describeResponse(text, { 'x-jenkins': hdr('x-jenkins') }) };
+  } catch (e) {
+    return { status: 0, error: e?.name === 'AbortError' ? 'timeout' : 'no response' };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function hostProbe(job) {
+  let rec = await getRoot(`https://${job.target}/`);
+  if (rec.status) rec.scheme = 'https';
+  else {
+    const plain = await getRoot(`http://${job.target}/`);
+    if (plain.status) rec = { ...plain, scheme: 'http' };
+  }
+  for (const k of Object.keys(rec)) if (rec[k] === undefined) delete rec[k];
+  rec.at = Date.now();
+  const data = await getHost(job.host);
+  if (job.wildcard) data.hostWildcard = { ...rec, name: job.target };
+  else {
+    data.hostChecks ||= {};
+    const prev = data.hostChecks[job.target];
+    data.hostChecks[job.target] = { ...rec, ...(prev?.seen ? { seen: prev.seen } : {}) };
+  }
+  markDirty(job.host);
+}
+
+// ── certificate transparency (manual): subdomains from the certificates logged for the registrable
+// domain, via crt.sh. Talks to crt.sh only (never to the target) and sends it the domain name.
+
+const CRT_SH = 'https://crt.sh/';
+const MAX_CT_NAMES = 5000;
+
+async function ctLookup({ host }) {
+  await ready();
+  if (!host) return { ok: false, error: 'No host' };
+  const site = siteOf(host.replace(/:\d+$/, ''));
+  if (!site.includes('.') || /^[\d.]+$/.test(site)) return { ok: false, error: 'Not a domain name' };
+  const data = await getHost(host);
+  let names;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 90000);
+  try {
+    const res = await fetch(`${CRT_SH}?q=${encodeURIComponent('%.' + site)}&output=json`, { credentials: 'omit', cache: 'no-store', signal: ctrl.signal });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    names = parseCtNames(await res.text(), site, MAX_CT_NAMES);
+  } catch (e) {
+    const msg = e?.name === 'AbortError' ? 'Timeout' : String(e?.message || e);
+    const error = `crt.sh: ${/HTTP (?:429|5\d\d)|Timeout/.test(msg) ? msg + ' (crt.sh is busy, try again later)' : msg}`;
+    data.ct = { checked: Date.now(), error };
+    markDirty(host);
+    return { ok: false, error };
+  } finally {
+    clearTimeout(timer);
+  }
+  const id = 'ct:' + site;
+  const newKeys = [];
+  const results = names.map((n) => {
+    const tags = ['ct'];
+    if (n !== site && DEV_HOST_RE.test(n.slice(0, -site.length - 1))) tags.push('interesting');
+    if (CLOUD_HOST_RE.test(n)) tags.push('cloud');
+    return { rule: 'ct-subdomain', label: 'Subdomain (certificate transparency)', category: 'subdomains', severity: 'info', value: n, tags, line: 0, col: 0 };
+  });
+  mergeFindings(data, results, { file: id, newKeys });
+  data.files[id] = { url: id, kind: 'ct', label: `${site} — certificate transparency (crt.sh)`, status: 'done', ts: Date.now(), count: names.length };
+  data.ct = { checked: Date.now(), names: names.length, added: newKeys.length };
+  markDirty(host);
+  return { ok: true, names: names.length, added: newKeys.length };
 }
 
 // ── Wayback Machine: historical JS and source maps (manual button, or automatic when enabled) ──
@@ -1332,6 +1472,43 @@ chrome.webRequest.onBeforeSendHeaders?.addListener(
   ['requestHeaders', 'extraHeaders'],
 );
 
+// ── subdomains the page itself loaded something from: live by definition, no extra request ──
+
+const seenHosts = new Set(); // "tabId|host" already recorded
+
+async function onHostSeen(d) {
+  if (d.tabId < 0 || !d.statusCode) return;
+  let u;
+  try {
+    u = new URL(d.url);
+  } catch {
+    return;
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return;
+  const host = u.host.toLowerCase();
+  const key = d.tabId + '|' + host;
+  if (seenHosts.has(key)) return;
+  const { settings } = await ready();
+  if (!settings.enabled || !settings.observeRequests) return;
+  const pageUrl = d.type === 'main_frame' ? d.url : await tabUrlCached(d.tabId);
+  const scope = scopeFor(pageUrl, settings, d.tabId);
+  if (!scope || siteOf(u.hostname) !== siteOf(scope.host.replace(/:\d+$/, ''))) return; // the target's own hosts only
+  if (seenHosts.size > 5000) seenHosts.clear();
+  seenHosts.add(key);
+  const data = await getHost(scope.host, scope.origin);
+  data.hostChecks ||= {};
+  const rec = (data.hostChecks[host] ||= {});
+  rec.seen = { status: d.statusCode, at: Date.now(), type: d.type, scheme: u.protocol.slice(0, -1) };
+  const id = 'observed:' + scope.host;
+  const tags = ['observed'];
+  if (u.hostname !== siteOf(u.hostname) && DEV_HOST_RE.test(u.hostname.slice(0, -siteOf(u.hostname).length - 1))) tags.push('interesting');
+  mergeFindings(data, [{ rule: 'seen-host', label: 'Host the page loaded from', category: 'subdomains', severity: 'info', value: host, tags, line: 0, col: 0 }], { file: id, sub: `${d.type} ${host}${u.pathname}` });
+  data.files[id] = { url: id, kind: 'observed', label: `${scope.host} — observed requests`, page: pageUrl, status: 'done', ts: Date.now(), count: fileCount(data, id) };
+  markDirty(scope.host);
+}
+
+chrome.webRequest.onCompleted.addListener((d) => void onHostSeen(d).catch(() => {}), { urls: ['http://*/*', 'https://*/*'] });
+
 // ── runtime hooks: names the page's code read / wrote, body fields, message handlers ──
 
 const RUNTIME_LIMITS = { params: 500, storage: 300, cookies: 200, attrs: 300, bodies: 300, handlers: 50 };
@@ -1575,6 +1752,8 @@ const HANDLERS = {
   wayback: waybackLookup,
   replay: replayToProxy,
   probe: probeEndpoints,
+  'probe-hosts': probeHosts,
+  'subdomains-ct': ctLookup,
   rescan,
   scope: scopeState,
   approve,
