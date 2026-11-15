@@ -27,6 +27,7 @@ const TABS = [
   { id: 'deps', label: 'Deps' },
   { id: 'intel', label: 'Intel' },
   { id: 'routes', label: 'Routes', optional: true },
+  { id: 'flags', label: 'Flags', optional: true },
   { id: 'sinks', label: 'Sinks', optional: true },
   { id: 'files', label: 'Files' },
 ];
@@ -185,7 +186,7 @@ const hostLabel = () => (isProgram() ? 'program' : ui.host);
 const scoped = () => hasScope(ui.scope);
 
 function buildModel(data) {
-  const m = { secrets: [], api: [], endpoints: [], urls: [], domains: [], cloud: [], params: [], deps: [], intel: [], sinks: [], routes: [], files: [], graphql: [] };
+  const m = { secrets: [], api: [], endpoints: [], urls: [], domains: [], cloud: [], params: [], deps: [], intel: [], sinks: [], routes: [], flags: [], files: [], graphql: [] };
   if (!data) return m;
   const pageSite = siteOf((ui.host || '').replace(/:\d+$/, ''));
   // the target's own sites: this host's, or in the program view every merged host's
@@ -305,6 +306,9 @@ function buildModel(data) {
   m.endpoints.sort(byInteresting);
   m.urls.sort(byInteresting);
   m.api.sort((a, b) => apiPriority(b) - apiPriority(a) || apiParts(a).path.localeCompare(apiParts(b).path) || a.value.localeCompare(b.value));
+  // flags: switched off first (the unreleased features), then interesting names, then by name
+  const flagRank = (f) => (f.tags?.includes('off') ? 2 : 0) + (f.tags?.includes('interesting') ? 1 : 0);
+  m.flags.sort((a, b) => flagRank(b) - flagRank(a) || a.value.localeCompare(b.value));
   m.routes.sort(
     (a, b) =>
       (b.tags?.includes('interesting') - a.tags?.includes('interesting')) ||
@@ -355,7 +359,7 @@ function makeMatcher(q) {
 
 const SEV_TABS = new Set(['secrets', 'intel', 'cloud', 'deps']);
 const NOISE_TABS = new Set(['endpoints', 'urls', 'intel', 'params']);
-const INTERESTING_TABS = new Set(['endpoints', 'urls', 'domains', 'api', 'params', 'routes']);
+const INTERESTING_TABS = new Set(['endpoints', 'urls', 'domains', 'api', 'params', 'routes', 'flags']);
 
 /** The Status filter: everything, only what is left to review, or one triage status. */
 function triagePass(f, tab = ui.tab) {
@@ -429,6 +433,10 @@ const CHIP_TITLES = {
   'out-of-scope': 'Excluded by the program scope (Settings → Program scope): no active checks are sent to it',
   'not-in-scope': 'Not listed in the program scope (Settings → Program scope): no active checks are sent to it',
   vulnerable: 'A library version with published advisories (retire.js data)',
+  off: 'Switched off (or false) for this page: the feature behind it may already exist on the server',
+  on: 'Switched on for this page',
+  'in-house': 'Evaluated by the app\'s own flag helper, not a known SDK',
+  'config-object': 'From a features: { … } object in the code or page config',
   library: 'Library version found; no known advisory for it',
 };
 
@@ -788,6 +796,26 @@ function depRow(f) {
   return expandable(row, f.key, () => detailFor(f));
 }
 
+/** A feature flag: its key, the SDK, the state delivered to the page and / or the default in the code. */
+function flagRow(f) {
+  const st = f.meta?.state;
+  const def = f.meta?.default;
+  const stateText = st != null && st !== 'listed' ? `= ${truncate(st, 24)}` : def != null ? `default ${truncate(def, 20)}` : '';
+  const row = h(
+    'div',
+    { class: `row link${f.tags?.includes('off') ? ' sev-low' : ''}` },
+    head(
+      h('span', { class: 'value mono', title: f.value }, f.value),
+      stateText ? h('span', { class: 'src mono flag-state', title: st != null ? 'Value delivered to this page' : 'Fallback value in the code' }, stateText) : null,
+      chips(f.tags),
+      h('span', { class: 'spacer' }),
+      srcSummary(f),
+      btn('Copy', 'Copy the flag key', () => copy(f.value)),
+    ),
+  );
+  return expandable(row, f.key, () => detailFor(f));
+}
+
 const VALUE_TITLE = { high: 'High-value target', medium: 'Worth a look' };
 
 function domainRow(d) {
@@ -907,6 +935,7 @@ const ROW = {
   intel: compactFindingRow,
   cloud: compactFindingRow,
   sinks: compactFindingRow,
+  flags: flagRow,
   deps: depRow,
   endpoints: linkRow,
   urls: linkRow,
@@ -929,6 +958,7 @@ const EMPTY = {
   intel: 'Nothing here yet.',
   sinks: 'No tainted DOM sinks found. Taint flows (a URL source reaching innerHTML / eval / navigation) run by default; the broader single-pattern sink rules can be enabled in Settings.',
   routes: 'No client-side routes found (React Router, Vue Router, Angular …).',
+  flags: 'No feature flags found (LaunchDarkly, GrowthBook, Unleash, Optimizely, Flagsmith, Statsig, Split, ConfigCat, PostHog or features: { … } config objects).',
   files: 'No files scanned yet.',
 };
 
@@ -1502,6 +1532,12 @@ function exportJson(data) {
   };
 }
 
+/** "LaunchDarkly · state false · default false" for the reports. */
+function flagSummary(f) {
+  const m = f.meta || {};
+  return [m.provider, m.state != null && m.state !== 'listed' ? `state ${m.state}` : null, m.default != null ? `default ${m.default}` : null].filter(Boolean).join(' · ');
+}
+
 /** Rows marked false positive stay out of the reports and SARIF. */
 const reportable = (list) => list.filter((f) => f.triage !== 'fp');
 const triageNote = (f) => (f.triage === 'reported' ? ' [reported]' : f.triage === 'reviewed' ? ' [reviewed]' : '');
@@ -1552,6 +1588,7 @@ function textReport() {
   section('Dependencies', reportable(m.deps).map((f) => `[${f.severity.toUpperCase()}] ${depLine(f)}${triageNote(f)}`));
   section('Intel', reportable(m.intel).map((f) => `[${f.severity}] ${f.label}: ${f.value}${triageNote(f)}`));
   section('Routes', m.routes.map((f) => `${f.value}${f.tags.length ? '\t[' + f.tags.join(',') + ']' : ''}${f.meta?.component ? '\t→ ' + f.meta.component : ''}`));
+  section('Feature flags', reportable(m.flags).map((f) => `${f.value}\t${flagSummary(f)}${triageNote(f)}`));
   section('Sinks', reportable(m.sinks).map((f) => `${f.label}: ${f.value}  (${f.sources.map(srcLabel).join(', ')})${triageNote(f)}`));
   section('Lazy chunks (from the bundler runtime)', Object.keys(ui.data?.chunkUrls || {}).sort());
   section('Files', m.files.map((f) => `${f.kind}\t${f.url}${f.error ? '\t' + f.error : ''}`));
@@ -1574,6 +1611,7 @@ function mdReport() {
     (f.meta?.body && !f.meta?.graphql ? ` — body: ${bodyFields(f.meta).map((n) => `\`${esc(n)}\``).join(', ')}` : '') +
     (f.tags?.includes('idor') ? ' _(idor)_' : '')));
   section('Routes', m.routes.map((f) => `- \`${esc(f.value)}\`${tagsOf(f)}`));
+  section('Feature flags', reportable(m.flags).map((f) => `- \`${esc(f.value)}\` — ${esc(flagSummary(f))}${triageNote(f)}`));
   section('Cloud', reportable(m.cloud).map((f) => `- **[${f.severity}]** ${esc(f.label)}: \`${esc(f.value)}\`${triageNote(f)}`));
   section('Dependencies', reportable(m.deps).map((f) => `- **[${f.severity}]** \`${esc(f.value)}\` — ${esc(f.meta?.kind === 'library' ? depLine(f).split('\t').slice(1).join(' · ') : f.label)}${triageNote(f)}`));
   section('Intel', reportable(m.intel).map((f) => `- **[${f.severity}]** ${esc(f.label)}: ${esc(f.value)}${triageNote(f)}`));

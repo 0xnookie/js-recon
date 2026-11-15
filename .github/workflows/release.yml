@@ -17,6 +17,13 @@ jobs:
         with:
           node-version: 20
 
+      # ship the latest retire.js advisories; the tests below run against them. A failed download keeps
+      # the copy in the repository.
+      - name: Refresh library advisories (retire.js)
+        run: |
+          node tools/update-vulndb.mjs || echo "::warning::Could not refresh the advisory data; shipping the bundled copy"
+          git diff --stat -- src/vulndb.js
+
       - name: Run tests
         run: |
           node test/run-tests.mjs

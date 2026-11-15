@@ -2158,3 +2158,18 @@ a.mini-link:hover {
 .status.in-scope:not(.busy)::before {
   background: var(--ok);
 }
+
+/* ── feature flags ── */
+.chip.off {
+  --c: var(--medium);
+}
+.chip.on {
+  --c: var(--ok);
+}
+.chip.in-house,
+.chip.config-object {
+  --c: var(--muted);
+}
+.row .src.flag-state {
+  color: var(--text-2);
+}

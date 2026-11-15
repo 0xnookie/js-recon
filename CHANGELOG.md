@@ -5,6 +5,34 @@ All notable changes to **JS Recon** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.0] — 2026-11-15
+
+### Added
+- **Flags tab: feature flags.** The flag keys the code evaluates, read from the SDK calls of
+  LaunchDarkly (`variation`, `variationDetail`), GrowthBook (`useFeatureIsOn`, `getFeatureValue`,
+  `isOn` …), Unleash (`useFlag`, `isEnabled`), Optimizely (`useDecision`, `decide`,
+  `isFeatureEnabled`), Flagsmith (`hasFeature`), Statsig (`checkGate`, `getExperiment` …), Split
+  (`getTreatment`), ConfigCat (`getValueAsync`), PostHog (`isFeatureEnabled`, `getFeatureFlag` …)
+  and in-house helpers (`isFeatureEnabled`, `isFlagEnabled` …), also in minified form
+  (`(0,o.useFeatureIsOn)("x")`), with the default value the code passes. Generic method names
+  (`isEnabled`, `getValue`, `decide`, `isOn`) only count in files that use that SDK.
+  - **State** from bootstrap / config payloads in the bundle or page: LaunchDarkly flag state,
+    GrowthBook features (`defaultValue`), Unleash toggles, Flagsmith flags, Optimizely datafiles and
+    `features: { x: false }` objects (which also keep their Intel summary). State, call site and
+    default of one flag are merged across rules and files.
+  - Flags that are off for the page are *low* and sorted first; names with words like *admin*,
+    *beta*, *internal*, *new*, *v2* are tagged *interesting*. Flags appear in the text / Markdown
+    reports.
+- **Feature-flag keys.** Server-side LaunchDarkly SDK keys (`sdk-<uuid>`), Statsig server secrets
+  (`secret-…`) and Flagsmith server keys (`ser.…`) are high-severity secrets; the client-side ID /
+  key (LaunchDarkly, Flagsmith, Statsig, GrowthBook) is listed under Intel with its provider.
+- **Fresh advisory data in every release.** The release workflow downloads the latest retire.js
+  advisories (`tools/update-vulndb.mjs`) before running the tests and packaging; a failed download
+  keeps the bundled copy. The updater refuses a download that looks truncated.
+
+### Changed
+- Tests of the library advisories no longer pin counts that new advisories can change.
+
 ## [1.11.0] — 2026-11-15
 
 ### Added

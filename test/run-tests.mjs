@@ -986,13 +986,35 @@ console.log('\nKnown-vulnerable libraries (retire.js data)');
   check(one('', 'https://code.jquery.com/jquery-1.12.4.min.js') === 'jquery 1.12.4 file name', 'jQuery from its file name (".min" dropped)');
   check(one('/**\n * @license AngularJS v1.5.8\n */') === 'angularjs 1.5.8 content', 'AngularJS banner');
   const v = vulnsFor('jquery', '3.4.1');
-  check(v.length === 2 && v.some((x) => x.ids.includes('CVE-2020-11022')) && fixedIn(v) === '3.5.0' && !vulnsFor('jquery', '3.5.0').length, 'jQuery 3.4.1: CVE-2020-11022 / 11023, fixed in 3.5.0; 3.5.0 clean');
+  check(v.length >= 2 && v.some((x) => x.ids.includes('CVE-2020-11022')) && isAtOrAbove(fixedIn(v), '3.5.0') && !vulnsFor('jquery', '3.5.0').some((x) => x.ids.includes('CVE-2020-11022')), `jQuery 3.4.1: CVE-2020-11022 / 11023, fixed in ${fixedIn(v)}; 3.5.0 not affected by them`);
   const f = libraryFindings('var a;\n/*! jQuery v1.12.4 */', '')[0];
-  check(f?.category === 'deps' && f.meta.kind === 'library' && f.rule === 'vulnerable-library' && f.value === 'jquery 1.12.4' && f.line === 2 && f.ctx?.[1] === '1.12.4' && f.meta['fixed in'] === '3.5.0', `finding: deps / library, line ${f?.line}, ${f?.meta?.advisories} advisories, worst ${f?.severity}`);
-  check(libraryFindings('/** @license React v16.13.1\n * react-dom.production.min.js */')[0]?.severity === 'info', 'a version without advisories is listed as info');
+  check(f?.category === 'deps' && f.meta.kind === 'library' && f.rule === 'vulnerable-library' && f.value === 'jquery 1.12.4' && f.line === 2 && f.ctx?.[1] === '1.12.4' && isAtOrAbove(f.meta['fixed in'], '3.5.0'), `finding: deps / library, line ${f?.line}, ${f?.meta?.advisories} advisories, worst ${f?.severity}`);
+  check(libraryFindings('/*! jQuery v99.0.0 */')[0]?.severity === 'info' && libraryFindings('/*! jQuery v99.0.0 */')[0]?.rule === 'library-version', 'a version without advisories is listed as info');
   const ng = libraryFindings('/**\n * @license AngularJS v1.5.8\n */')[0];
   check(ng?.meta.eol === true && /end of life/.test(ng.meta['fixed in']), 'AngularJS 1.x: no fixed release (end of life), not "fixed in 1.999"');
   check(licenseFileRef('/*! For license information please see main.4f2a.js.LICENSE.txt */\n!function(){}', 'https://app.acme.com/static/js/main.4f2a.js') === 'https://app.acme.com/static/js/main.4f2a.js.LICENSE.txt' && licenseFileRef('var a', 'https://x/y.js') === null, '.LICENSE.txt reference resolved next to the bundle');
+}
+
+console.log('\nFeature flags');
+{
+  const { interestingFlag } = await import('../src/flags.js');
+  const flags = (code) => analyze(code, rules).filter((f) => f.category === 'flags');
+  const byKey = (list, k) => list.find((f) => f.value === k);
+  const ld = flags('import{initialize as i}from"launchdarkly-js-client-sdk";var c=i(id,u,{bootstrap:{"new-checkout":{"value":false,"variation":1,"version":7},"dark-mode":{"value":true,"variation":0,"version":2}}});if(c.variation("new-checkout",!1)){}c.variationDetail("admin-impersonation", false);');
+  const nc = byKey(ld, 'new-checkout');
+  check(nc?.severity === 'low' && nc.meta.state === 'false' && nc.meta.default === 'false' && nc.meta.provider === 'LaunchDarkly' && nc.tags.includes('off') && nc.tags.includes('interesting'), 'LaunchDarkly: bootstrap state and call site of one flag merged (state, default, off, interesting)');
+  check(byKey(ld, 'dark-mode')?.tags.includes('on') && byKey(ld, 'admin-impersonation')?.meta.call === 'variationDetail("admin-impersonation", false)', 'flag that is on, and a call site with its default');
+  const gb = flags('var g=new GrowthBook({apiHost:"https://cdn.growthbook.io"});(0,r.useFeatureIsOn)("enableNewDashboard");var f={"features":{"beta_reports":{"defaultValue":false,"rules":[]}}};');
+  check(byKey(gb, 'enableNewDashboard')?.meta.provider === 'GrowthBook' && byKey(gb, 'beta_reports')?.meta.state === 'false', 'GrowthBook: minified hook call (0,r.useFeatureIsOn)("…") and features payload');
+  const un = flags('new UnleashClient({url:"/api/frontend"}).isEnabled("internal.admin-panel");var t={"toggles":[{"name":"v2-search","enabled":false,"variant":{"name":"disabled"}}]};statsig.checkGate("staff_tools");client.getTreatment("checkout_flow");');
+  check(byKey(un, 'internal.admin-panel')?.meta.provider === 'Unleash' && byKey(un, 'v2-search')?.tags.includes('off') && byKey(un, 'staff_tools')?.meta.provider === 'Statsig' && byKey(un, 'checkout_flow')?.meta.provider === 'Split', 'Unleash, Statsig and Split call sites and toggles');
+  const generic = flags('if(isEnabled("foo"))x();e.getValue("email");o.decide("x");t.variation("color");isFeatureEnabled("newBilling")');
+  check(generic.length === 1 && generic[0].value === 'newBilling' && generic[0].meta.provider === 'in-house', 'generic names (isEnabled, getValue, decide, variation without a default) need the SDK in the file; isFeatureEnabled counts as in-house');
+  const obj = analyze('window.CFG={features:{feedback:false,handover:true}};', rules);
+  check(obj.some((f) => f.rule === 'feature-flags' && f.category === 'intel') && obj.filter((f) => f.category === 'flags').map((f) => f.value + '=' + f.meta.state).join() === 'feedback=false,handover=true', 'features: { … } objects: the Intel summary plus one row per flag');
+  const keys = analyze(`var a="${'sd' + 'k-'}1b2c3d4e-5f6a-4b7c-8d9e-0f1a2b3c4d5e",b="${'sec' + 'ret-'}Ab12Cd34Ef56Gh78Ij90Kl12Mn34Op56Qr78St90Uv",c="${'se' + 'r.'}Ab12Cd34Ef56Gh78Ij90Kl",d={clientSideID:"5f1a2b3c4d5e6f7a8b9c0d1e"};`, rules);
+  check(['launchdarkly-sdk-key', 'statsig-server-secret', 'flagsmith-server-key'].every((id) => keys.some((f) => f.rule === id && f.severity === 'high')) && keys.some((f) => f.rule === 'flag-client-key' && f.meta.provider === 'LaunchDarkly'), 'server-side flag keys are secrets; the client-side ID is Intel');
+  check(interestingFlag('enableNewCheckout') && interestingFlag('staffTools') && !interestingFlag('renewal') && !interestingFlag('newsletter') && !interestingFlag('dark-mode'), 'interesting flag names by whole words (enableNewCheckout yes, renewal no)');
 }
 
 console.log('\nProgram view: merging in-scope hosts');

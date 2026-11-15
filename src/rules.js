@@ -16,6 +16,7 @@ import { graphqlAt } from './graphql.js';
 import { routeInfo } from './routes.js';
 import { taintAt } from './taint.js';
 import { enrichAwsKey, enrichGcpServiceAccount, enrichFirebaseKey } from './enrich.js';
+import { FLAG_RULES, objectFlags } from './flags.js';
 import {
   urlExprAt, bodyAt, objectKeyAt, keyBody, keyString, nextArg, assignmentBefore, skipWs, skipBalanced, isIdName, pathHasId, samplePayload,
 } from './request.js';
@@ -32,6 +33,7 @@ export const CATEGORY_LABELS = {
   intel: 'Intel',
   sinks: 'DOM sinks',
   routes: 'Routes',
+  flags: 'Feature flags',
 };
 
 const S = 'secrets';
@@ -779,6 +781,15 @@ function globalConfig(v, m, ctx) {
   return { value: `window.${name}`, meta };
 }
 
+/** clientSideID: "24 hex" (LaunchDarkly), environmentID (Flagsmith), client-… (Statsig), clientKey: "sdk-…" (GrowthBook). */
+function flagClientKey(v, m) {
+  if (m[3]) return { value: m[3], meta: { provider: 'Statsig' } };
+  if (m[4]) return { value: m[4], meta: { provider: 'GrowthBook' } };
+  const k = m[1].toLowerCase();
+  if (k === 'clientsideid') return /^[a-f0-9]{24}$/.test(m[2]) ? { value: m[2], meta: { provider: 'LaunchDarkly' } } : null;
+  return /\d/.test(m[2]) && /[A-Za-z]/.test(m[2]) ? { value: m[2], meta: { provider: 'Flagsmith' } } : null;
+}
+
 /** `features: { feedback: false, handover: !1 }` → which features are switched off client-side. */
 function featureFlags(v, m) {
   const on = [];
@@ -788,11 +799,15 @@ function featureFlags(v, m) {
   }
   if (!on.length && !off.length) return null;
   const list = [...off.map((k) => `${k}=off`), ...on.map((k) => `${k}=on`)].join(', ');
-  return {
-    value: `${m[1]}: ${list}`.slice(0, 300),
-    severity: off.length ? 'low' : 'info',
-    meta: { disabled: off.join(', ') || '—', enabled: on.join(', ') || '—' },
-  };
+  return [
+    {
+      value: `${m[1]}: ${list}`.slice(0, 300),
+      severity: off.length ? 'low' : 'info',
+      meta: { disabled: off.join(', ') || '—', enabled: on.join(', ') || '—' },
+    },
+    // and one row per flag in the Flags tab
+    ...objectFlags([...off.map((k) => [k, false]), ...on.map((k) => [k, true])].slice(0, 200)),
+  ];
 }
 
 // ── GraphQL ──
@@ -1052,6 +1067,13 @@ export const RULES = [
     /\b(?:mongodb(?:\+srv)?|postgres(?:ql)?|mysql|mariadb|redis|rediss|amqps?|mssql|sqlserver|couchdb|neo4j(?:\+s)?|clickhouse|jdbc:[a-z0-9]{2,12}):\/\/[^\s"'`<>]{3,300}/gi,
     { post: dbConn }),
   rule('sentry-auth', 'Sentry Auth Token', S, 'high', /\bsntr(?:ys|yu)_[0-9A-Za-z_-]{40,}(?![0-9A-Za-z_-])/g),
+  // ── Feature-flag services: server-side keys never belong in client code (client-side IDs are public) ──
+  rule('launchdarkly-sdk-key', 'LaunchDarkly server-side SDK key', S, 'high', /\bsdk-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/g,
+    { desc: 'A server-side SDK key downloads every flag of the environment with its full targeting rules and segments (user lists, e-mail domains, internal IDs). Browsers use the 24-hex client-side ID instead.' }),
+  rule('statsig-server-secret', 'Statsig server secret key', S, 'high', /\bsecret-[A-Za-z0-9]{30,64}\b/g,
+    { desc: 'Statsig server secret: evaluates every gate, experiment and config with their rules, and can log events as the server. Browsers use a client- key.' }),
+  rule('flagsmith-server-key', 'Flagsmith server-side environment key', S, 'high', /\bser\.[A-Za-z0-9]{20,40}\b/g,
+    { desc: 'Flagsmith server-side key: reads the environment document with every flag, segment and its rules. Browsers use the plain environment ID.' }),
   rule('sentry-dsn', 'Sentry DSN', I, 'low', /https?:\/\/[a-f0-9]{32}(?::[a-f0-9]{32})?@[a-z0-9.-]{1,120}(?::\d+)?\/\d+/g,
     { post: (v) => (/:[a-f0-9]{32}@/.test(v) ? { severity: 'medium', category: S, label: 'Sentry DSN (with secret)' } : true) }),
   rule('basic-auth-url', 'Credentials in URL', S, 'high',
@@ -1157,9 +1179,15 @@ export const RULES = [
   rule('global-config', 'Injected config object', I, 'info',
     /\bwindow\s*(?:\.\s*([A-Za-z_$][\w$]{2,60})|\[\s*["'`]([A-Za-z_$][\w$]{2,60})["'`]\s*\])\s*=\s*(?=\{|JSON\.parse\()/g,
     { post: globalConfig, desc: 'Configuration the server injects into the page. Its keys are often accepted as parameters or overrides.' }),
+  rule('flag-client-key', 'Feature-flag client key', I, 'info',
+    /(?:\b(clientSideID|clientSideId|environmentID|environmentId)["'`]?\s*[:=]\s*["'`]([A-Za-z0-9_-]{16,40})["'`])|\b(client-[A-Za-z0-9]{30,64})\b|\bclientKey["'`]?\s*:\s*["'`](sdk-[A-Za-z0-9]{8,32})["'`]/g,
+    { post: flagClientKey, desc: 'The feature-flag service\'s client-side key for this environment. Public by design: it names the provider and environment (a staging or internal environment ID in production code is a lead). The Flags tab lists the flags the code evaluates.' }),
   rule('feature-flags', 'Feature flags', I, 'info',
     /["'`]?\b(features|featureFlags|feature_flags|featureToggles|feature_toggles|flags|toggles|experiments)["'`]?\s*:\s*\{([^{}]{3,3000})\}/g,
     { post: featureFlags, desc: 'Features switched off on the client often still exist on the server. Look for their endpoints and try enabling them.' }),
+
+  // ── Feature flags the code evaluates (Flags tab), see src/flags.js ──
+  ...FLAG_RULES,
 
   // ── Parameters and other client-side inputs (meta.kind says which) ──
   rule('param-read', 'Query parameter read', 'params', 'info',

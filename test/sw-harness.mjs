@@ -637,13 +637,25 @@ console.log('\nKnown-vulnerable libraries');
   await drain();
   const dl = mem['host:app.acme.test'];
   const jq = dl.findings['deps|library:jquery 3.4.1'];
-  check(jq?.rule === 'vulnerable-library' && jq.severity === 'medium' && /CVE-2020-11022/.test(jq.meta.ids) && jq.meta['fixed in'] === '3.5.0', `jQuery 3.4.1 from the bundle's .LICENSE.txt: ${jq?.meta?.advisories} advisories, fixed in ${jq?.meta?.['fixed in']}`);
+  check(jq?.rule === 'vulnerable-library' && jq.severity !== 'info' && /CVE-2020-11022/.test(jq.meta.ids), `jQuery 3.4.1 from the bundle's .LICENSE.txt: ${jq?.meta?.advisories} advisories, fixed in ${jq?.meta?.['fixed in']}`);
   check(jq?.sources[0]?.file.endsWith('vendor.77aa.js.LICENSE.txt') && dl.files['https://app.acme.test/static/js/vendor.77aa.js.LICENSE.txt']?.kind === 'license', 'license file fetched once and listed in Files');
-  check(dl.findings['deps|library:angularjs 1.5.8']?.severity !== 'info' && dl.findings['deps|library:react-dom 16.13.1']?.rule === 'library-version', 'AngularJS 1.5.8 vulnerable, react-dom 16.13.1 listed without advisories');
+  check(dl.findings['deps|library:angularjs 1.5.8']?.severity !== 'info' && dl.findings['deps|library:react-dom 16.13.1'], 'AngularJS 1.5.8 vulnerable, react-dom 16.13.1 listed');
   const lo = dl.findings['deps|library:lodash 4.17.15'];
   check(lo?.meta?.found === 'script URL' && lo.tags.includes('vulnerable'), 'lodash 4.17.15 recognised from its CDN URL');
   check(dl.findings['deps|library:DOMPurify 3.2.4'] && fetched.slice(beforeLib).filter((u) => u.endsWith('.LICENSE.txt')).length === 1, 'version banner in the code recognised');
   check(!fetched.some((u) => /registry\.npmjs\.org\/(?:jquery|lodash)(?:%20|\s)/.test(u)), 'library findings are never looked up on npm as package names');
+}
+
+console.log('\nFeature flags');
+{
+  FILES['https://app.acme.test/static/js/flags.88bb.js'] = { body: 'import"launchdarkly-js-client-sdk";var c=ld.initialize(id,u);if(c.variation("beta-export",!1))show();c.variation("dark-mode",true);' };
+  fire('https://app.acme.test/static/js/flags.88bb.js');
+  await send({ type: 'scan-text', host: 'app.acme.test', text: 'window.__LD__={"beta-export":{"value":false,"variation":1,"version":3}};' });
+  await drain();
+  const fl = mem['host:app.acme.test'].findings;
+  const be = fl['flags|beta-export'];
+  check(be?.meta?.state === 'false' && be.meta.default === 'false' && be.tags.includes('off') && be.severity === 'low' && be.sources.length === 2, `flag state from an inline script and call site from a bundle merged (${JSON.stringify(be?.meta)})`);
+  check(fl['flags|dark-mode']?.meta?.provider === 'LaunchDarkly' && fl['flags|dark-mode'].meta.default === 'true', 'call-site-only flag listed with its default');
 }
 
 console.log('\nTriage');

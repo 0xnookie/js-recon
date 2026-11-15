@@ -12,11 +12,12 @@ import { findChunks } from './chunks.js';
 import { analyzeHeaders } from './headers.js';
 import { parseCtNames, hostCandidates, describeResponse } from './hosts.js';
 import { libraryFindings, licenseFileRef } from './libs.js';
+import { mergeFlag } from './flags.js';
 import { compileScope, hasScope, hostScope, urlScope } from './scope.js';
 
 const KEY = (host) => 'host:' + host;
 const MAX_SOURCES = 8;
-const LIGHT_CATEGORIES = new Set(['endpoints', 'urls', 'params', 'api', 'subdomains', 'deps']);
+const LIGHT_CATEGORIES = new Set(['endpoints', 'urls', 'params', 'api', 'subdomains', 'deps', 'flags']);
 const TAG_MERGE = new Set(['endpoints', 'urls', 'params', 'api', 'subdomains']);
 const JS_URL_RE = /\.m?js(?:[?#]|$)/i;
 const SCRIPT_KINDS = new Set(['script', 'crawled', 'chunk', 'manual']);
@@ -268,6 +269,7 @@ function mergeFindings(data, results, src) {
     if (TAG_MERGE.has(r.category)) for (const t of r.tags || []) if (!f.tags.includes(t)) f.tags = [...f.tags, t];
     // the same endpoint called with other fields elsewhere; a body field sent to several endpoints
     if (r.category === 'api' && r.meta?.body) mergeBody(f, r);
+    if (r.category === 'flags' && f.hits) mergeFlag(f, r); // state from one file, call site from another
     if (r.category === 'params' && r.meta?.example && f.meta && r.meta.example !== f.meta.example) {
       const more = f.meta.examples || [];
       if (!more.includes(r.meta.example) && more.length < 10) f.meta = { ...f.meta, examples: [...more, r.meta.example] };

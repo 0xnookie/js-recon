@@ -4,6 +4,7 @@
 
 import { secretConfidence } from './rules.js';
 import { exampleSignals } from './enrich.js';
+import { mergeFlag } from './flags.js';
 
 const DATA_URI_BLOB_RE = /(data:[\w/+.-]{1,100};base64,)([A-Za-z0-9+/=]{512,})/g;
 const LONG_BLOB_RE = /(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{3000,}={0,2}/g;
@@ -118,6 +119,8 @@ export function analyze(code, rules, opts = {}) {
         if (prev) {
           prev.hits++;
           if (category === 'api' && extra?.meta) mergeBody(prev, extra);
+          // a flag's state (bootstrap) and its call site (default) in the same file: keep both
+          if (category === 'flags' && extra?.meta) mergeFlag(prev, extra);
           continue;
         }
         if (!starts) starts = lineStarts(text);
