@@ -5,6 +5,27 @@ All notable changes to **JS Recon** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.1] — 2026-11-16
+
+### Security
+- **CLI: `-H` headers stay on the target.** Headers given with `-H` (session cookies, tokens) were sent
+  with every request, including third-party scripts, their source maps and `.LICENSE.txt` files. They
+  now only go to the registrable domains of the targets you list. Redirects are followed by hand, so a
+  hop to another site doesn't get them either, and a redirect into a host the `--scope` excludes is no
+  longer followed.
+
+### Fixed
+- **Popup toolbar overflow.** At the popup's 780px width the filter toolbar no longer fit once a tab had
+  every filter (Endpoints, Domains, or Secrets after a redeploy): Copy was cut off and the severity
+  select wrapped onto two lines. In the popup, Copy and Mark reviewed are now icon buttons (Mark
+  reviewed shows a short "Mark 12?" while it waits for the second click); the dashboard keeps its
+  labels.
+
+### Changed
+- README: new screenshots (Flags, Deps advisories, triage and notes, the live check and high-value
+  targets, "Ask before scanning", program scope), current captions and badges, and the CLI in
+  *Safety & Authorization*.
+
 ## [1.13.0] — 2026-11-15
 
 ### Added
@@ -273,6 +294,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   response headers of the pages you visit, surfacing endpoints, API keys, secrets, source
   maps, cloud assets and other recon data, with per-host findings and report exports.
 
+[1.13.1]: https://github.com/0xnookie/js-recon/releases/tag/v1.13.1
+[1.13.0]: https://github.com/0xnookie/js-recon/releases/tag/v1.13.0
+[1.12.0]: https://github.com/0xnookie/js-recon/releases/tag/v1.12.0
+[1.11.0]: https://github.com/0xnookie/js-recon/releases/tag/v1.11.0
 [1.9.0]: https://github.com/0xnookie/js-recon/releases/tag/v1.9.0
 [1.8.0]: https://github.com/0xnookie/js-recon/releases/tag/v1.8.0
 [1.7.0]: https://github.com/0xnookie/js-recon/releases/tag/v1.7.0

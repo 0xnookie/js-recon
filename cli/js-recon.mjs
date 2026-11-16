@@ -27,7 +27,8 @@ Targets
   --host <name>           file local findings under this host (default: local)
 
 Fetching
-  -H, --header "K: V"     extra request header, repeatable (e.g. -H "Cookie: session=…")
+  -H, --header "K: V"     extra request header, repeatable (e.g. -H "Cookie: session=…"); only sent to
+                          the targets' own sites (registrable domain), never to scripts hosted elsewhere
   --scope <file>          program scope (HackerOne CSV, Burp JSON or scope text, as in the extension):
                           targets outside it are skipped, excluded hosts are never fetched
   --first-party           only fetch scripts from the target's own registrable domain

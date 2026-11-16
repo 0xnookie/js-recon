@@ -15,14 +15,14 @@ JS Recon
 [![CI](https://github.com/0xnookie/js-recon/actions/workflows/ci.yml/badge.svg)](https://github.com/0xnookie/js-recon/actions/workflows/ci.yml)
 [![Security](https://img.shields.io/badge/Security-Recon-red)]()
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Browser](https://img.shields.io/badge/Chrome%20%7C%20Edge-Manifest%20V3-black?logo=googlechrome&logoColor=white)]()
+[![Browser](https://img.shields.io/badge/Chrome%20%7C%20Edge%20%7C%20Firefox-Manifest%20V3-black?logo=googlechrome&logoColor=white)]()
 [![Rules](https://img.shields.io/badge/Rules-178-brightgreen)]()
-[![Secret rules](https://img.shields.io/badge/Secret%20rules-68-red)]()
+[![Secret rules](https://img.shields.io/badge/Secret%20rules-82-red)]()
 [![Cloud](https://img.shields.io/badge/Cloud%20providers-14-informational)]()
 [![Bundlers](https://img.shields.io/badge/Lazy%20chunks-webpack%20%7C%20Next.js%20%7C%20Vite%20%7C%20ESM-8A2BE2)]()
 [![Dependencies](https://img.shields.io/badge/Runtime%20deps-0-brightgreen)]()
 [![Build](https://img.shields.io/badge/Build%20step-none-lightgrey)]()
-[![Version](https://img.shields.io/badge/Version-1.13.0-orange)]()
+[![Version](https://img.shields.io/badge/Version-1.13.1-orange)]()
 [![PRs](https://img.shields.io/badge/PRs-welcome-brightgreen)]()
 
 </div>
@@ -74,7 +74,7 @@ Modern web apps ship their attack surface to the browser: API routes, feature fl
 - **Send GET URLs to proxy** (active, two clicks): requests each concrete, harmless-looking same-site GET URL once, so it lands in the site map of the proxy your browser uses.
 - **Subdomain liveness and high-value targets** (Domains tab): *Find more (crt.sh)* adds every name from the certificate-transparency logs (sends the domain name to crt.sh, nothing to the target); *Check live* (active, two clicks) requests `/` of each subdomain over HTTPS, then HTTP, without cookies — max 500 hosts, same registrable domain only, deny-listed hosts never — and rates each one. Exported as `live-hosts.txt` and `high-value-hosts.txt` and at the top of the text / Markdown reports.
 - **Endpoint liveness** (active, two clicks): sends the same safe same-site GET requests and records the HTTP status next to each endpoint, API and route — telling live (200), **protected (401 / 403, worth testing)**, wrong-method (405), redirecting (3xx) and dead (404) apart. GET only, same site only, capped, never cross-site.
-- **Triage**: every row has a ✓ (*reviewed*) button, and its detail offers *Reviewed* / *Reported* / *False positive* and a **note** ("reported as H1 #123456", shown on the row, searchable, in the reports). The **Status** filter shows everything, only what's left **to review** (tab counts follow), or one status; **Mark reviewed** marks every row shown (two clicks). Triaged secrets stop counting on the toolbar badge and in notifications; false positives are left out of the text / Markdown reports and SARIF. Kept per host, apart from the findings, so rescans and redeploys keep it.
+- **Triage**: every row has a ✓ (*reviewed*) button, and its detail offers *Reviewed* / *Reported* / *False positive* and a **note** ("reported as H1 #123456", shown on the row, searchable, in the reports). The **Status** filter shows everything, only what's left **to review** (tab counts follow), or one status; **Mark reviewed** (a ✓ icon next to Copy in the popup) marks every row shown (two clicks). Triaged secrets stop counting on the toolbar badge and in notifications; false positives are left out of the text / Markdown reports and SARIF. Kept per host, apart from the findings, so rescans and redeploys keep it.
 - **Program scope** (Settings → *Program scope*): paste the scope table of a HackerOne / Bugcrowd / Intigriti / YesWeHack program (the *In scope* / *Out of scope* headings are understood), HackerOne's scope CSV or Burp's project-options JSON. `*.acme.com` (every subdomain), `acme.com` (that host), `api-*.acme.com`, `app.acme.com:8443`, `https://acme.com/api` (paths count for URL checks) and IPv4 ranges; out of scope wins, unlisted counts as out. Once set, the subdomain live check, endpoint liveness, *Send GET URLs to proxy* and source-map guessing **only contact in-scope hosts and URLs**. A host that isn't in scope shows a chip next to the host menu (in scope: a green status dot), the Domains tab greys out-of-scope hosts and gets an **In scope** filter, the ask-first prompt says whether the site is in scope, and *Scan in-scope sites without asking* can stand in for the per-site OK.
 - **All in-scope hosts** (host menu, with a scope set): every scanned in-scope host merged into one view and one set of exports. Relative endpoints and API paths are made absolute per host so they stay apart; a secret found on several hosts is one row listing them all. Triage from here is written back to every host. *Check live* and *Find more (crt.sh)* run across every in-scope site at once.
 - **Offline secret enrichment** (no network): AWS access keys are decoded to the **account number** that owns them — computed from the key ID locally, nothing is sent to AWS — alongside the key type; GCP service-account JSON and Firebase web config are tied to their **project**; and JWTs are flagged *expired* / *expires-soon* from their `exp` claim. Demo / example-looking values are tagged so they can be hidden. JS Recon never validates a discovered credential against its issuer; confirm a key yourself with the issuer's own tooling (e.g. `aws sts get-access-key-info`).
@@ -92,32 +92,44 @@ Modern web apps ship their attack surface to the browser: API routes, feature fl
 
 <table>
   <tr>
-    <td width="50%"><img src="assets/screenshots/popup-secrets.png" alt="Secrets" width="100%" /><br/><sub><b>Secrets</b>: severity-coded, entropy confidence, source location</sub></td>
-    <td width="50%"><img src="assets/screenshots/popup-api.png" alt="API endpoints" width="100%" /><br/><sub><b>API</b>: HTTP methods in Swagger colours, GraphQL operations, what's new since the last deploy, one-click curl</sub></td>
+    <td width="50%"><img src="assets/screenshots/popup-secrets.png" alt="Secrets" width="100%" /><br/><sub><b>Secrets</b>: severity-coded, entropy confidence, located in the original source when a source map is exposed</sub></td>
+    <td width="50%"><img src="assets/screenshots/popup-triage.png" alt="Triage and notes" width="100%" /><br/><sub><b>Triage</b>: <i>reviewed</i> / <i>reported</i> / <i>false positive</i> and a note per row; the AWS key is decoded to its owning account, offline</sub></td>
   </tr>
 </table>
 
 <p align="center">
-  <img src="assets/screenshots/dashboard-params.png" alt="Params tab in the dashboard" width="100%" />
-  <br/><sub><b>Params</b>: every client-side input grouped by kind and tagged by where it was seen: in config, in real traffic (<i>observed</i>) or by the runtime hooks</sub>
+  <img src="assets/screenshots/dashboard-api.png" alt="API tab in the dashboard" width="100%" />
+  <br/><sub><b>API</b>: HTTP methods in Swagger colours, request body fields, IDOR candidates, GraphQL operations, what's <i>new</i> since the last deploy, one-click curl</sub>
 </p>
 
 <table>
   <tr>
-    <td width="50%"><img src="assets/screenshots/popup-domains.png" alt="Domains" width="100%" /><br/><sub><b>Domains</b>: subdomains from code, CSP and CORS</sub></td>
-    <td width="50%"><img src="assets/screenshots/popup-intel.png" alt="Intel" width="100%" /><br/><sub><b>Intel</b>: exposed source maps, feature flags, headers, internal IPs</sub></td>
+    <td width="50%"><img src="assets/screenshots/popup-flags.png" alt="Feature flags" width="100%" /><br/><sub><b>Flags</b>: the feature flags the code evaluates (LaunchDarkly, GrowthBook, config objects …) and their state for this page, switched-off ones first</sub></td>
+    <td width="50%"><img src="assets/screenshots/popup-deps.png" alt="Dependencies and vulnerable libraries" width="100%" /><br/><sub><b>Deps</b>: package names missing from npm (dependency confusion) and bundled library versions with known advisories</sub></td>
+  </tr>
+</table>
+
+<p align="center">
+  <img src="assets/screenshots/dashboard-domains.png" alt="Domains tab in the dashboard" width="100%" />
+  <br/><sub><b>Domains</b>: subdomains from the code, CSP, the page's traffic and certificate transparency (crt.sh); the two-click live check adds status and page title, high-value targets come first, takeover signatures are flagged and out-of-scope hosts greyed</sub>
+</p>
+
+<table>
+  <tr>
+    <td width="50%"><img src="assets/screenshots/popup-params.png" alt="Parameters" width="100%" /><br/><sub><b>Params</b>: every client-side input, tagged by where it was seen: in the code, in real traffic (<i>observed</i>) or by the runtime hooks</sub></td>
+    <td width="50%"><img src="assets/screenshots/popup-ask.png" alt="Ask before scanning" width="100%" /><br/><sub><b>Ask before scanning</b> (the default): nothing is fetched from a site until you OK it, and the chip says whether the program scope covers it</sub></td>
   </tr>
 </table>
 
 <p align="center">
   <img src="assets/screenshots/dashboard-files.png" alt="Files tab in the dashboard" width="100%" />
-  <br/><sub><b>Files</b>: scripts, never-loaded lazy chunks, iframes, source maps, headers, observed traffic, runtime hooks and archived files</sub>
+  <br/><sub><b>Files</b>: scripts, never-loaded lazy chunks, iframes, source maps (rebuilt sources as a ZIP), license files, headers, observed traffic, runtime hooks, certificate-transparency and archived files</sub>
 </p>
 
 <table>
   <tr>
-    <td width="50%"><img src="assets/screenshots/settings.png" alt="Settings" width="100%" /><br/><sub><b>Settings</b>: scanning, scope, rules and storage</sub></td>
-    <td width="50%"><img src="assets/screenshots/popup-api-light.png" alt="Light theme" width="100%" /><br/><sub><b>Light theme</b>: follows the system setting</sub></td>
+    <td width="50%"><img src="assets/screenshots/popup-intel.png" alt="Intel, light theme" width="100%" /><br/><sub><b>Intel</b>: CORS and CSP weaknesses, postMessage handlers, exposed source maps, redeploys, server banners. Shown in the light theme, which follows the system setting</sub></td>
+    <td width="50%"><img src="assets/screenshots/settings.png" alt="Program scope settings" width="100%" /><br/><sub><b>Program scope</b>: paste the scope from the program page; active checks only go to what it lists, and a tester says where any host or URL falls</sub></td>
   </tr>
 </table>
 
@@ -216,7 +228,7 @@ cat urls.txt | js-recon -l - --only secrets,flags --min-severity medium
 js-recon ./jsrecon-dump/ --host app.example.com         # local files, e.g. the extension's Dump ZIP
 js-recon https://app.example.com/ -H "Cookie: session=…" --scope scope.csv --fail-on high
 ```
-The same analysis as the extension (rules, source maps, lazy chunks, libraries, flags, passwords) without the browser: what a page loads is fetched once, with your headers. `--scope` takes the program scope in any format the Settings page imports; excluded hosts are never requested. `--fail-on high` makes it a CI gate. `js-recon --help` lists every option.
+The same analysis as the extension (rules, source maps, lazy chunks, libraries, flags, passwords) without the browser: what a page loads is fetched once. `-H` headers (a session cookie, a token, the program's research header) go only to the targets' own sites, never to scripts, source maps or files hosted elsewhere. `--scope` takes the program scope in any format the Settings page imports; excluded hosts are never requested, not even through a redirect. `--fail-on high` makes it a CI gate. `js-recon --help` lists every option.
 
 ---
 
@@ -343,6 +355,10 @@ JS Recon is for **authorized** security testing only: pentest engagements, bug-b
 - ✅ With a program scope set, active checks never contact a host or URL it doesn't list
 - ✅ Findings stay in your browser; nothing is uploaded
 - ✅ The dependency-confusion check only *reads* the npm registry; nothing is ever published
+- ✅ The CLI only requests what a target page loads: the page, its scripts, source maps, lazy chunks and `.LICENSE.txt` files. It never contacts subdomains, crt.sh, npm or the Wayback Machine
+- ✅ The CLI's `-H` headers (cookies, tokens) only go to the targets' own sites, also across redirects, never to scripts, source maps or files hosted elsewhere
+- ✅ With `--scope`, the CLI skips targets outside the scope and never requests a host or URL the scope excludes, redirects included
+- ✅ CLI results go to your terminal and the files you name (`--json`, `--sarif`); nothing is uploaded
 - ❌ Don't point it at systems you aren't authorized to test
 - ❌ Results are leads, not verdicts: confirm secrets, dependency-confusion candidates, CSP / CORS findings and takeover signatures (`dig CNAME host`) before reporting
 - ❌ Set the program scope (Settings → *Program scope*) before running active checks; without it they cover the target's whole registrable domain, and a single-host program doesn't allow that

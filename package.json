@@ -1,6 +1,6 @@
 {
   "name": "js-recon",
-  "version": "1.13.0",
+  "version": "1.13.1",
   "description": "JavaScript recon for bug bounty and pentests: endpoints, secrets, source maps, feature flags and vulnerable libraries — browser extension and command line.",
   "private": true,
   "type": "module",

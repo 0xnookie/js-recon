@@ -1129,7 +1129,8 @@ function renderTriageButton() {
   const clearing = ui.triage !== 'all' && ui.triage !== 'todo';
   const armed = Date.now() - triageArmed < 6000;
   b.classList.toggle('primary', armed);
-  b.lastChild.textContent = armed ? ` ${clearing ? 'Clear' : 'Mark'} ${n}? Click again` : clearing ? ' Clear status' : ' Mark reviewed';
+  // the popup shows this button as an icon; only the armed state gets a (short) label there
+  b.querySelector('.lbl').textContent = armed ? `${clearing ? 'Clear' : 'Mark'} ${n}?${FULL ? ' Click again' : ''}` : clearing ? 'Clear status' : 'Mark reviewed';
   b.title = clearing ? `Clear the status of the ${n} rows shown` : `Mark the ${n} rows shown as reviewed (two clicks)`;
 }
 

@@ -132,14 +132,38 @@ export async function scan({ targets = [], texts = [], host: forcedHost = null, 
     }
   };
 
+  // -H headers (session cookies, tokens) only go to the targets' own sites (registrable domains), never to
+  // scripts, source maps or license files hosted elsewhere. Redirects are followed by hand, so every hop
+  // gets the same check, and a hop the program scope excludes is never requested.
+  const targetSites = new Set();
+  const urlSite = (url) => {
+    try {
+      return siteOf(new URL(url).hostname);
+    } catch {
+      return null;
+    }
+  };
+  const MAX_REDIRECTS = 10;
+
   async function get(url) {
-    const res = await fetchImpl(url, { headers: { 'user-agent': 'js-recon-cli', ...o.headers }, redirect: 'follow', signal: AbortSignal.timeout(o.timeoutMs) });
+    let current = url;
+    let res;
+    for (let hop = 0; ; hop++) {
+      const extra = targetSites.has(urlSite(current)) ? o.headers : {};
+      res = await fetchImpl(current, { headers: { 'user-agent': 'js-recon-cli', ...extra }, redirect: 'manual', signal: AbortSignal.timeout(o.timeoutMs) });
+      const location = res.status >= 300 && res.status < 400 ? res.headers.get('location') : null;
+      if (!location) break;
+      if (hop >= MAX_REDIRECTS) throw new Error('too many redirects');
+      current = new URL(location, current).href;
+      if (!/^https?:$/.test(new URL(current).protocol)) throw new Error('redirected to a non-HTTP URL');
+      if (o.ignoreUrl?.(current)) throw new Error('redirected out of scope');
+    }
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const len = Number(res.headers.get('content-length') || 0);
     if (len > o.maxBytes) throw new Error(`too large (${(len / 1048576).toFixed(1)} MB)`);
     const text = await res.text();
     if (text.length > o.maxBytes) throw new Error(`too large (${(text.length / 1048576).toFixed(1)} MB)`);
-    return { text, type: res.headers.get('content-type') || '', finalUrl: res.url || url, headers: res.headers };
+    return { text, type: res.headers.get('content-type') || '', finalUrl: current, headers: res.headers };
   }
 
   const allowedScript = (url, pageHost) => {
@@ -277,6 +301,7 @@ export async function scan({ targets = [], texts = [], host: forcedHost = null, 
       continue;
     }
     started = true;
+    targetSites.add(siteOf(u.hostname));
     const host = forcedHost || u.host;
     hostData(host, u.origin);
     push({ kind: /\.m?js(?:[?#]|$)/i.test(u.pathname) ? 'script' : /\.map(?:[?#]|$)/i.test(u.pathname) ? 'map' : 'page', url: u.href, host, origin: u.origin });

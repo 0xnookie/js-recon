@@ -1101,6 +1101,28 @@ console.log('\nCommand line (engine with a mocked fetch)');
   check(v('GET /api/v2/users/') && v('POST /api/v1/session'), 'API calls from the bundle and the map');
   check(!asked.some((u) => /google-analytics|blocked\./.test(u)), 'ignored script hosts and scope-excluded URLs are never requested');
   check(collect(res, { minSeverity: 'high' }).every((f) => f.severity === 'high' || f.severity === 'critical') && collect(res, { only: ['flags'] }).every((f) => f.category === 'flags'), '--min-severity / --only filters');
+  // -H headers: only to the target's own site, also across redirects; redirects into excluded hosts aren't followed
+  const HSITE = {
+    'https://www.acme.test/': [302, '', { location: 'https://app.acme.test/home' }],
+    'https://app.acme.test/home': [200, '<!doctype html><script src="https://cdn.other.test/lib.js"></script><script src="/static/app.js"></script><script src="/static/go.js"></script><script src="/static/out.js"></script>', { 'content-type': 'text/html' }],
+    'https://cdn.other.test/lib.js': [200, 'var x=1;\n//# sourceMappingURL=https://maps.other.test/lib.js.map', { 'content-type': 'application/javascript' }],
+    'https://maps.other.test/lib.js.map': [200, MAP, { 'content-type': 'application/json' }],
+    'https://app.acme.test/static/app.js': [200, 'fetch("/api/v1/me");', { 'content-type': 'application/javascript' }],
+    'https://app.acme.test/static/go.js': [301, '', { location: 'https://cdn.other.test/moved.js' }],
+    'https://cdn.other.test/moved.js': [200, 'fetch("/api/v1/moved");', { 'content-type': 'application/javascript' }],
+    'https://app.acme.test/static/out.js': [302, '', { location: 'https://blocked.acme.test/y.js' }],
+  };
+  const sent = [];
+  const hFetch = async (url, init) => {
+    sent.push({ url, cookie: init.headers.Cookie || null, redirect: init.redirect });
+    const r = HSITE[url];
+    return r ? new Response(r[1] || null, { status: r[0], headers: r[2] }) : new Response('nope', { status: 404 });
+  };
+  const hres = await scan({ targets: ['https://www.acme.test/'], fetchImpl: hFetch, options: { headers: { Cookie: 'session=s3cr3t' }, ignoreUrl: (u) => u.includes('blocked.') } });
+  const withCookie = sent.filter((s) => s.cookie).map((s) => s.url).sort();
+  check(withCookie.join() === ['https://app.acme.test/home', 'https://app.acme.test/static/app.js', 'https://app.acme.test/static/go.js', 'https://app.acme.test/static/out.js', 'https://www.acme.test/'].join(), `-H headers only to the target's site (${withCookie.length} requests)`);
+  check(sent.some((s) => s.url === 'https://cdn.other.test/lib.js') && sent.some((s) => s.url === 'https://maps.other.test/lib.js.map') && sent.some((s) => s.url === 'https://cdn.other.test/moved.js') && sent.every((s) => s.redirect === 'manual'), 'scripts, maps and redirect hops on other sites are still fetched, without them');
+  check(!sent.some((s) => s.url.includes('blocked.')) && collect(hres).some((f) => f.value === 'GET /api/v1/moved') && Object.keys(hres.hosts).join() === 'www.acme.test', 'a redirect into an excluded host is not followed; redirected scripts are scanned');
   const local = await scan({ texts: [{ id: 'bundle.js', text: 'var DB_PASS="pT4$wq9Lx2Rm";' }, { id: 'app.js.map', text: MAP, map: true }], host: 'local.test', fetchImpl: () => { throw new Error('no network for local files'); } });
   const lf = collect(local);
   check(lf.some((f) => f.value === 'pT4$wq9Lx2Rm') && lf.some((f) => f.value === 'jquery 3.4.1') && Object.keys(local.hosts).join() === 'local.test', 'local files and .map files, without network');

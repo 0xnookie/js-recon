@@ -1251,6 +1251,29 @@ body.full .toolbar {
   font: 11px/normal var(--mono);
 }
 
+#sevFilter {
+  flex: none;
+}
+
+/* the 780px popup can't fit every filter plus two labelled buttons: Copy and Mark reviewed become icons
+   there (their titles say what they do); Mark reviewed shows its "Mark 12?" label while it waits for the second click */
+body:not(.full) .toolbar .btn {
+  flex: none;
+}
+
+body:not(.full) .toolbar .btn:not(.primary) {
+  width: 28px;
+  padding: 0;
+}
+
+body:not(.full) .toolbar input[type='search'] {
+  min-width: 110px;
+}
+
+body:not(.full) .toolbar .btn:not(.primary) .lbl {
+  display: none;
+}
+
 /* ── list ── */
 
 .list {
